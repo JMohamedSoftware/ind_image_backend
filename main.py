@@ -17,8 +17,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory storage for indexed features
-indexed_data = []
+import pickle
+
+# File-based storage for persistence
+INDEX_FILE = "index.pkl"
+
+def save_index(data):
+    with open(INDEX_FILE, "wb") as f:
+        pickle.dump(data, f)
+
+def load_index():
+    if os.path.exists(INDEX_FILE):
+        try:
+            with open(INDEX_FILE, "rb") as f:
+                return pickle.load(f)
+        except Exception as e:
+            print(f"Error loading index: {e}")
+    return []
+
+# Load data on startup
+indexed_data = load_index()
 
 # Initialize ORB detector
 orb = cv2.ORB_create(nfeatures=1000)
@@ -64,6 +82,7 @@ async def index_image(
             "url": url if url else None,
             "descriptors": des,
         })
+        save_index(indexed_data)
         return {
             "status": "success", 
             "filename": target_filename, 

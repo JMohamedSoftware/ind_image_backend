@@ -1,0 +1,9 @@
+# requirements.txt
+fastapi
+uvicorn
+opencv-python-headless
+numpy
+python-multipart
+pillow
+python-dotenv
+requests

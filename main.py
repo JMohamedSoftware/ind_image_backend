@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, Form, Body
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 import io
 import requests
@@ -57,13 +57,14 @@ async def root():
 @app.post("/api/index")
 async def index_image(
     file: UploadFile = File(None), 
-    url: str = Body(None),
-    filename: str = Body(None)
+    url: str = Form(None),
+    filename: str = Form(None)
 ):
     contents = None
     if url:
         try:
             response = requests.get(url)
+            response.raise_for_status()
             contents = response.content
             target_filename = filename or url.split('/')[-1]
         except Exception as e:
@@ -74,7 +75,10 @@ async def index_image(
     else:
         return {"error": "No image provided (neither file nor url)"}
 
-    kp, des = process_image_content(contents)
+    result = process_image_content(contents)
+    if result is None:
+        return {"status": "error", "message": "Could not decode image"}
+    kp, des = result
     
     if des is not None:
         indexed_data.append({
@@ -92,11 +96,12 @@ async def index_image(
     return {"status": "error", "message": "No features found"}
 
 @app.post("/api/search")
-async def search_image(file: UploadFile = File(None), url: str = Body(None)):
+async def search_image(file: UploadFile = File(None), url: str = Form(None)):
     contents = None
     if url:
         try:
             response = requests.get(url)
+            response.raise_for_status()
             contents = response.content
         except Exception as e:
             return {"error": f"Failed to fetch image from URL: {str(e)}"}
@@ -105,10 +110,16 @@ async def search_image(file: UploadFile = File(None), url: str = Body(None)):
     else:
         return {"error": "No image provided"}
 
-    kp_query, des_query = process_image_content(contents)
+    result = process_image_content(contents)
+    if result is None:
+        return {"results": [], "message": "Could not decode image"}
+    kp_query, des_query = result
     
     if des_query is None:
         return {"results": [], "message": "No features found in query image"}
+    
+    if not indexed_data:
+        return {"results": [], "message": "No images in index yet. Please upload and index images first."}
     
     results = []
     for item in indexed_data:

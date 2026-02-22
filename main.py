@@ -117,7 +117,8 @@ async def index_image(
     file: UploadFile = File(None),
     url: str = Form(None),
     filename: str = Form(None),
-    algorithm: str = Form("ORB")
+    algorithm: str = Form("ORB"),
+    description: str = Form(None)
 ):
     contents = None
     if url:
@@ -154,6 +155,7 @@ async def index_image(
             "descriptors": des,
             "algorithm": algorithm.upper(),
             "keypoint_count": len(kp_coords),
+            "description": description
         })
         save_index(indexed_data)
         return {
@@ -237,6 +239,7 @@ async def search_image(
                 "similarityScore": round(float(score), 1),
                 "matchesCount": int(matches_count),
                 "algorithm": item.get("algorithm", algorithm),
+                "description": item.get("description"),
                 "educational_info": {
                     "method": algo,
                     "concept": f"Similarity calculated using {algo} features.",
@@ -288,9 +291,10 @@ async def search_text(
         # Boost score if words match (very basic mock logic)
         score = similarity * 100
         words = query.lower().split()
+        meta_text = (item["filename"] + " " + (item.get("description") or "")).lower()
         for w in words:
-            if w in item["filename"].lower():
-                score += 20
+            if w in meta_text:
+                score += 25
         
         score = min(max(score, 10), 98.5) # Keep it realistic
         
@@ -300,6 +304,7 @@ async def search_text(
             "similarityScore": round(float(score), 1),
             "matchesCount": 0,
             "algorithm": "CLIP",
+            "description": item.get("description"),
             "educational_info": {
                 "method": "CLIP",
                 "concept": "Multimodal Embedding Alignment",

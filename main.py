@@ -99,9 +99,18 @@ def get_matcher(algorithm: str):
 async def root():
     return {"message": "Visual Search API — Educational Edition"}
 
-@app.get("/api/stats")
-async def stats():
-    return {"indexed_count": len(indexed_data)}
+@app.get("/api/index/list")
+async def list_indexed_images():
+    # Return minimal metadata for the gallery
+    return [
+        {
+            "filename": img["filename"],
+            "url": img.get("url"),
+            "algorithm": img.get("algorithm"),
+            "keypoint_count": img.get("keypoint_count", 0)
+        }
+        for img in indexed_data
+    ]
 
 @app.post("/api/index")
 async def index_image(

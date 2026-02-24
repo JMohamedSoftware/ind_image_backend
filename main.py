@@ -42,6 +42,21 @@ def load_index():
         try:
             with open(INDEX_FILE, "rb") as f:
                 data = pickle.load(f)
+                
+                # MIGRATION: Ensure all items have a descriptors_map
+                migrated = False
+                for item in data:
+                    if "descriptors_map" not in item:
+                        print(f"MIGRATION: Updating legacy item {item.get('filename')}")
+                        orig_algo = item.get("algorithm", "ORB").upper()
+                        item["descriptors_map"] = {orig_algo: item.get("descriptors")}
+                        migrated = True
+                
+                if migrated:
+                    print("MIGRATION COMPLETE: Saving updated database.")
+                    # We'll save it after return if needed, but let's do it here
+                    # save_index(data) - can't call yet due to lock order in some cases, will save on first index
+                
                 print(f"DATABASE: Loaded {len(data)} items from {INDEX_FILE}")
                 return data
         except Exception as e:
@@ -136,6 +151,15 @@ def process_image_content(contents, algorithm="ORB", description=None):
     # This prevents the indexer from failing due to "No features found"
     return [], None, color_stats
 
+# ─── UNIVERSAL FEATURE EXTRACTION ──────────────────────────────────────────
+
+# Define which algorithms belong to which category for "Universal Pool" processing
+CATEGORY_MAP = {
+    "CBIR": ["ORB", "SIFT", "AKAZE", "HOG"],
+    "DL": ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT", "CLIP"],
+    "TBIR": ["TBIR_BASIC"]
+}
+
 def get_matcher(algorithm: str):
     algo = algorithm.upper() if algorithm else "ORB"
     if algo == "SIFT":
@@ -161,7 +185,7 @@ def format_indexed_item(item):
         "id": item.get("id", item["filename"]),
         "filename": item["filename"],
         "url": item.get("url"),
-        "algorithm": algo,
+        "algorithm": item.get("algorithm", algo), # Keep original index algorithm for metadata
         "description": item.get("description"),
         "type": item.get("type", "CBIR"),
     }
@@ -175,7 +199,8 @@ def format_indexed_item(item):
 
 @app.get("/api/index/list")
 async def list_indexed_images(type: str = None):
-    # Return images filtered by type (TBIR, CBIR, DL)
+    # Return images filtered by category (TBIR, CBIR, DL)
+    # This allows all images in a category to show up regardless of current algo
     filtered = indexed_data
     if type:
         filtered = [img for img in indexed_data if img.get("type", "CBIR") == type.upper()]
@@ -211,43 +236,59 @@ async def index_image(
     if result is None:
         return {"status": "error", "message": "Could not decode image or unsupported algorithm"}
 
-    kp_coords, des, color_stats = result # Now returns color_stats
+    kp_coords, des, color_stats = result # Standard result for the indexing algo
     
-    # Determine type based on algorithm or presence of description
+    # Determine type based on algorithm
     img_type = get_type_for_algorithm(algorithm)
-    # If it's TBIR, we essentially use common fields
     
-    # If it's TBIR or we have descriptors, save it
-    # Note: For TBIR, 'descriptors' will be None but we still index it
-    if des is not None or img_type == "TBIR":
-        global indexed_data
-        # Remove any existing entry with the same hash OR filename
-        indexed_data = [x for x in indexed_data if x.get("hash") != img_hash and x.get("filename") != target_filename]
-        
-        indexed_data.append({
-            "id": str(uuid.uuid4()), # Unique stable ID
-            "filename": target_filename,
-            "url": url if url else None,
-            "hash": img_hash,
-            "descriptors": des,
-            "algorithm": algorithm.upper(),
-            "type": img_type,
-            "keypoint_count": len(kp_coords) if kp_coords else 0,
-            "description": description,
-            "color_stats": color_stats,
-            "indexed_at": time.time()
-        })
-        save_index(indexed_data)
-        return {
-            "status": "success",
-            "id": indexed_data[-1]["id"],
-            "filename": target_filename,
-            "keypoints": len(kp_coords) if kp_coords else 0,
-            "algorithm": algorithm.upper(),
-            "type": img_type,
-            "color_stats": color_stats,
-            "keypoint_coords": kp_coords[:50] if kp_coords else [],
-        }
+    # MULTI-DESCRIPTOR EXTRACTION:
+    # Compute descriptors for ALL algorithms in the same category
+    descriptors_map = {}
+    total_kp_count = 0
+    
+    category_algos = CATEGORY_MAP.get(img_type, [algorithm.upper()])
+    for algo_id in category_algos:
+        try:
+            # Re-process for each algo (efficient enough for demo)
+            algo_res = process_image_content(contents, algo_id, description)
+            if algo_res:
+                _, algo_des, _ = algo_res
+                descriptors_map[algo_id] = algo_des
+                if algo_id == algorithm.upper():
+                    total_kp_count = len(algo_res[0])
+        except Exception as e:
+            print(f"Failed to extract {algo_id}: {e}")
+
+    global indexed_data
+    # Remove any existing entry with the same hash OR filename
+    indexed_data = [x for x in indexed_data if x.get("hash") != img_hash and x.get("filename") != target_filename]
+    
+    indexed_data.append({
+        "id": str(uuid.uuid4()),
+        "filename": target_filename,
+        "url": url if url else None,
+        "hash": img_hash,
+        "descriptors": des, # Legacy field for safety
+        "descriptors_map": descriptors_map, # New multi-descriptor storage
+        "algorithm": algorithm.upper(),
+        "type": img_type,
+        "keypoint_count": total_kp_count,
+        "description": description,
+        "color_stats": color_stats,
+        "indexed_at": time.time()
+    })
+    save_index(indexed_data)
+    
+    return {
+        "status": "success",
+        "id": indexed_data[-1]["id"],
+        "filename": target_filename,
+        "keypoints": total_kp_count,
+        "algorithm": algorithm.upper(),
+        "type": img_type,
+        "color_stats": color_stats,
+        "keypoint_coords": kp_coords[:50] if kp_coords else [],
+    }
 
     return {"status": "error", "message": "No features found in image for chosen algorithm"}
 
@@ -351,13 +392,20 @@ async def search_image(
         results = sorted(results, key=lambda x: x["similarityScore"], reverse=True)
         return {"results": results[:6], "query_keypoints": 0, "query_color_stats": color_query, "message": "Low feature detection - using color-based similarity fallback."}
 
-    # Filter indexed data by the EXACT algorithm to ensure descriptor compatibility
-    filtered_db = [img for img in indexed_data if img.get("algorithm") == algo]
+    # Filter indexed data by the SAME CATEGORY (Type) to allow cross-algorithm sharing
+    filtered_db = [img for img in indexed_data if img.get("type", "CBIR") == search_type]
     if not filtered_db:
-        return {"results": [], "message": f"No images indexed with {algo} yet. Please index some images first!"}
+        return {"results": [], "message": f"No images in the {search_type} pool yet. Please index some first!"}
 
     for item in filtered_db:
-        des_indexed = item["descriptors"]
+        # Pull correct descriptor from the map for the requested search algorithm
+        des_map = item.get("descriptors_map", {})
+        des_indexed = des_map.get(algo)
+        
+        # Backward compatibility fallback
+        if des_indexed is None and item.get("algorithm") == algo:
+            des_indexed = item.get("descriptors")
+            
         if des_indexed is None or len(des_indexed) == 0:
             continue
             

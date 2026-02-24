@@ -12,6 +12,15 @@ import uuid
 
 import threading
 
+# ─── UNIVERSAL FEATURE EXTRACTION ──────────────────────────────────────────
+
+# Define which algorithms belong to which category for "Universal Pool" processing
+CATEGORY_MAP = {
+    "CBIR": ["ORB", "SIFT", "AKAZE", "HOG"],
+    "DL": ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT", "CLIP"],
+    "TBIR": ["TBIR_BASIC"]
+}
+
 app = FastAPI()
 
 # Thread lock for persistence stability
@@ -43,19 +52,46 @@ def load_index():
             with open(INDEX_FILE, "rb") as f:
                 data = pickle.load(f)
                 
-                # MIGRATION: Ensure all items have a descriptors_map
+                # MIGRATION: Ensure all items have a descriptors_map and all simulated descriptors
                 migrated = False
+                all_dl_algos = CATEGORY_MAP["DL"]
+                
                 for item in data:
                     if "descriptors_map" not in item:
                         print(f"MIGRATION: Updating legacy item {item.get('filename')}")
                         orig_algo = item.get("algorithm", "ORB").upper()
                         item["descriptors_map"] = {orig_algo: item.get("descriptors")}
                         migrated = True
+                    
+                    # Ensure all DL algorithms have descriptors (simulated via hash/description)
+                    img_hash = item.get("hash", "00000000")
+                    description = item.get("description")
+                    
+                    for algo in all_dl_algos:
+                        if algo not in item["descriptors_map"]:
+                            # We can reconstruct simulated features using the hash/description
+                            algo_salt = hashlib.md5(algo.encode()).hexdigest()[:4]
+                            if algo == "CLIP" and description:
+                                seed_text = f"{description.lower().strip()}_{algo_salt}"
+                            else:
+                                seed_text = f"{img_hash[:8]}_{algo_salt}"
+                            
+                            np.random.seed(int(hashlib.md5(seed_text.encode()).hexdigest()[:8], 16) % 2**32)
+                            
+                            if algo == "CNN": length = 4096
+                            elif algo == "CLIP": length = 512
+                            elif algo == "SVM": length = 64
+                            elif algo == "MEANSHIFT": length = 16
+                            else: length = 32
+                            
+                            features = np.random.randn(length).astype(np.float32)
+                            features /= (np.linalg.norm(features) + 1e-8)
+                            item["descriptors_map"][algo] = features
+                            migrated = True
                 
                 if migrated:
                     print("MIGRATION COMPLETE: Saving updated database.")
-                    # We'll save it after return if needed, but let's do it here
-                    # save_index(data) - can't call yet due to lock order in some cases, will save on first index
+                    save_index(data) # Persist the migrated data
                 
                 print(f"DATABASE: Loaded {len(data)} items from {INDEX_FILE}")
                 return data
@@ -127,10 +163,12 @@ def process_image_content(contents, algorithm="ORB", description=None):
         # Simulate feature extraction for educational demo
         # Salted Seed: adding algo name ensures different algos produce different rankings (DIVERSITY)
         algo_salt = hashlib.md5(algo.encode()).hexdigest()[:4]
+        
+        # Ensure seed_text is ALWAYS defined for robustness
+        img_hash = get_image_hash(contents) if contents else "00000000"
         if algo == "CLIP" and description:
             seed_text = f"{description.lower().strip()}_{algo_salt}"
         else:
-            img_hash = get_image_hash(contents)
             seed_text = f"{img_hash[:8]}_{algo_salt}"
             
         np.random.seed(int(hashlib.md5(seed_text.encode()).hexdigest()[:8], 16) % 2**32)
@@ -157,14 +195,7 @@ def process_image_content(contents, algorithm="ORB", description=None):
     # This prevents the indexer from failing due to "No features found"
     return [], None, color_stats
 
-# ─── UNIVERSAL FEATURE EXTRACTION ──────────────────────────────────────────
-
-# Define which algorithms belong to which category for "Universal Pool" processing
-CATEGORY_MAP = {
-    "CBIR": ["ORB", "SIFT", "AKAZE", "HOG"],
-    "DL": ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT", "CLIP"],
-    "TBIR": ["TBIR_BASIC"]
-}
+# ──────────────────────────────────────────────────────────────────────────
 
 def get_matcher(algorithm: str):
     algo = algorithm.upper() if algorithm else "ORB"
@@ -247,13 +278,15 @@ async def index_image(
     # Determine type based on algorithm
     img_type = get_type_for_algorithm(algorithm)
     
-    # MULTI-DESCRIPTOR EXTRACTION:
-    # Compute descriptors for ALL algorithms in the same category
+    # UNIVERSAL DESCRIPTOR EXTRACTION:
+    # Compute descriptors for ALL known algorithms to populate a truly universal pool
     descriptors_map = {}
     total_kp_count = 0
     
-    category_algos = CATEGORY_MAP.get(img_type, [algorithm.upper()])
-    for algo_id in category_algos:
+    # Flatten all algos from CATEGORY_MAP
+    all_algos = [algo for group in CATEGORY_MAP.values() for algo in group]
+    
+    for algo_id in all_algos:
         try:
             # Re-process for each algo (efficient enough for demo)
             algo_res = process_image_content(contents, algo_id, description)
@@ -375,8 +408,10 @@ async def search_image(
     if not contents and not (query_text and algorithm.upper() == "CLIP"):
          return {"results": [], "message": "Provide an image or text (for CLIP)"}
 
-    # Filter indexed data by the SAME CATEGORY (Type) to allow cross-algorithm sharing
-    filtered_db = [img for img in indexed_data if img.get("type", "CBIR") == search_type]
+    # UNIVERSAL SEARCH: 
+    # Search across ALL indexed images. If an image is missing descriptors for the
+    # current algorithm, we'll handle it below (robust fallback).
+    filtered_db = indexed_data
     
     # Robust Fallback: If visual descriptors failed to extract (e.g. blurry image)
     # we fall back to color comparison so the user always sees results.

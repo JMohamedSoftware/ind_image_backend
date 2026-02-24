@@ -90,7 +90,7 @@ def get_type_for_algorithm(algo):
     if algo in ["SIFT", "ORB", "AKAZE", "HOG"]: return "CBIR"
     return "CBIR" # Default
 
-def process_image_content(contents, algorithm="ORB"):
+def process_image_content(contents, algorithm="ORB", description=None):
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
@@ -104,7 +104,13 @@ def process_image_content(contents, algorithm="ORB"):
         return [], features, color_stats
     elif algo in ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT", "CLIP"]:
         # Simulate feature extraction for educational demo
-        np.random.seed(int(get_image_hash(contents)[:8], 16) % 2**32)
+        # For CLIP, the user description acts as the "Semantic Seed" (Labeling/Classification)
+        if algo == "CLIP" and description:
+            seed_text = description.lower().strip()
+            np.random.seed(int(hashlib.md5(seed_text.encode()).hexdigest()[:8], 16) % 2**32)
+        else:
+            np.random.seed(int(get_image_hash(contents)[:8], 16) % 2**32)
+            
         # Different lengths for different algos to "look" realistic
         if algo == "CNN" or algo == "CLIP": length = 128
         elif algo == "SVM": length = 64
@@ -194,7 +200,7 @@ async def index_image(
 
     img_hash = get_image_hash(contents)
     
-    result = process_image_content(contents, algorithm)
+    result = process_image_content(contents, algorithm, description)
     if result is None:
         return {"status": "error", "message": "Could not decode image or unsupported algorithm"}
 

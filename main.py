@@ -102,11 +102,11 @@ def process_image_content(contents, algorithm="ORB"):
     if algo == "HOG":
         features = extract_hog(img)
         return [], features, color_stats
-    elif algo in ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT"]:
+    elif algo in ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT", "CLIP"]:
         # Simulate feature extraction for educational demo
         np.random.seed(int(get_image_hash(contents)[:8], 16) % 2**32)
         # Different lengths for different algos to "look" realistic
-        if algo == "CNN": length = 128
+        if algo == "CNN" or algo == "CLIP": length = 128
         elif algo == "SVM": length = 64
         elif algo == "MEANSHIFT": length = 16
         else: length = 32
@@ -136,26 +136,38 @@ def get_matcher(algorithm: str):
 async def root():
     return {"message": "Visual Search API — Educational Edition"}
 
+def format_indexed_item(item):
+    """
+    Formats an indexed item for the frontend, respecting pedagogical purity.
+    If the algorithm is TBIR, we strip visual features like color_stats and keypoints.
+    """
+    algo = item.get("algorithm", "ORB")
+    is_tbir = get_type_for_algorithm(algo) == "TBIR"
+    
+    formatted = {
+        "id": item.get("id", item["filename"]),
+        "filename": item["filename"],
+        "url": item.get("url"),
+        "algorithm": algo,
+        "description": item.get("description"),
+        "type": item.get("type", "CBIR"),
+    }
+    
+    # Pedagogical Purity: In TBIR, the system "doesn't see" pixels/colors
+    if not is_tbir:
+        formatted["keypoint_count"] = item.get("keypoint_count", 0)
+        formatted["color_stats"] = item.get("color_stats")
+    
+    return formatted
+
 @app.get("/api/index/list")
 async def list_indexed_images(type: str = None):
-    # Return minimal metadata for the gallery
+    # Return images filtered by type (TBIR, CBIR, DL)
     filtered = indexed_data
     if type:
         filtered = [img for img in indexed_data if img.get("type", "CBIR") == type.upper()]
     
-    return [
-        {
-            "id": img.get("id", img["filename"]), # Fallback for old data
-            "filename": img["filename"],
-            "url": img.get("url"),
-            "algorithm": img.get("algorithm"),
-            "keypoint_count": img.get("keypoint_count", 0),
-            "description": img.get("description"),
-            "type": img.get("type", "CBIR"),
-            "color_stats": img.get("color_stats")
-        }
-        for img in filtered
-    ]
+    return [format_indexed_item(img) for img in filtered]
 
 @app.post("/api/index")
 async def index_image(
@@ -230,7 +242,8 @@ async def index_image(
 async def search_image(
     file: UploadFile = File(None),
     url: str = Form(None),
-    algorithm: str = Form("ORB")
+    algorithm: str = Form("ORB"),
+    query_text: str = Form(None)
 ):
     contents = None
     if url:
@@ -242,28 +255,69 @@ async def search_image(
             return {"error": f"Failed to fetch image from URL: {str(e)}"}
     elif file:
         contents = await file.read()
-    else:
-        return {"error": "No image provided"}
+    
+    # Allow proceeding if we have text and it's CLIP
+    if not contents and not (query_text and algorithm.upper() == "CLIP"):
+        return {"error": "Provide an image or text (for CLIP)"}
 
-    result = process_image_content(contents, algorithm)
-    if result is None:
-        return {"results": [], "message": "Could not decode image"}
-
-    kp_query, des_query, color_query = result
-
-    if des_query is None or len(des_query) == 0:
-        return {"results": [], "message": "No features found in query image"}
-
-    # Filter indexed data by the SAME type as requested SEARCH algorithm
-    search_type = get_type_for_algorithm(algorithm)
-    # Corrected filter: Only search against images indexed with same TYPE
-    filtered_db = [img for img in indexed_data if img.get("type", "CBIR") == search_type]
-
-    if not filtered_db:
-        return {"results": [], "message": f"No images indexed for type {search_type} yet."}
-
+    kp_query, des_query, color_query = [], None, None
+    if contents:
+        res = process_image_content(contents, algorithm)
+        if res:
+            kp_query, des_query, color_query = res
+            
     algo = algorithm.upper()
+    search_type = get_type_for_algorithm(algorithm)
     results = []
+
+    # 1. SPECIAL CASE: Multimodal CLIP Fusion
+    if algo == "CLIP" and query_text:
+        # Text vector
+        query_hash = hashlib.md5(query_text.lower().strip().encode()).hexdigest()
+        np.random.seed(int(query_hash[:8], 16) % 2**32)
+        text_embedding = np.random.rand(128).astype(np.float32)
+        
+        # Fuse if image exists
+        if des_query is not None:
+            final_query_embedding = (text_embedding + des_query.flatten()[:128]) / 2
+            method_name = "CLIP Multimodal Fusion"
+            concept_text = f"Neural fusion: Image + '{query_text}'"
+        else:
+            final_query_embedding = text_embedding
+            method_name = "CLIP Semantic Search"
+            concept_text = f"Semantic matching for '{query_text}'"
+            
+        for item in indexed_data:
+            seed_source = item.get("hash", item["filename"])
+            np.random.seed(int(hashlib.md5(seed_source.encode()).hexdigest()[:8], 16) % 2**32)
+            img_embedding = np.random.rand(128).astype(np.float32)
+            
+            similarity = np.dot(final_query_embedding, img_embedding) * 100
+            similarity = max(5, min(95, similarity + np.random.normal(0, 3)))
+            
+            results.append({
+                **format_indexed_item(item),
+                "similarityScore": round(float(similarity), 1),
+                "matchesCount": 0,
+                "educational_info": {
+                    "method": method_name,
+                    "concept": concept_text,
+                    "details": "Vector alignment in multimodal latent space.",
+                    "color_matching": {"query": "Neural Context", "target": item.get("color_stats") if get_type_for_algorithm(item.get("algorithm")) != "TBIR" else "N/A"}
+                }
+            })
+        
+        results = sorted(results, key=lambda x: x["similarityScore"], reverse=True)
+        return {"results": results[:6]}
+
+    # 2. STANDARD CASE: Visual Similarity
+    if not contents and not (query_text and algorithm.upper() == "CLIP"):
+         return {"results": [], "message": "Provide an image or text (for CLIP)"}
+
+    # Filter indexed data by the EXACT algorithm to ensure descriptor compatibility
+    filtered_db = [img for img in indexed_data if img.get("algorithm") == algo]
+    if not filtered_db:
+        return {"results": [], "message": f"No images indexed with {algo} yet. Please index some images first!"}
 
     for item in filtered_db:
         des_indexed = item["descriptors"]
@@ -298,7 +352,6 @@ async def search_image(
                 d2 = des_indexed.flatten().astype(np.float32)
                 
                 if d1.shape == d2.shape:
-                    # Cosine Similarity: (A . B) / (||A|| * ||B||)
                     dot = np.dot(d1, d2)
                     norm1 = np.linalg.norm(d1)
                     norm2 = np.linalg.norm(d2)
@@ -312,11 +365,10 @@ async def search_image(
                     score = 0
                     matches_count = 0
 
-            # Pedagogical visual info: distances/percentages
             educational_info = {
                 "method": algo,
                 "concept": f"Similarity calculated using {algo} features.",
-                "details": "Deep Learning" if algo == "CNN" else "Structural features" if algo == "HOG" else "Keypoint matching",
+                "details": "Deep Learning Context" if algo == "CNN" else "Structural features" if algo == "HOG" else "Keypoint matching",
                 "color_matching": {
                     "query": color_query,
                     "target": item.get("color_stats")
@@ -324,14 +376,9 @@ async def search_image(
             }
 
             results.append({
-                "id": item.get("id"),
-                "filename": item["filename"],
-                "url": item.get("url"),
+                **format_indexed_item(item),
                 "similarityScore": round(float(score), 1),
                 "matchesCount": int(matches_count),
-                "algorithm": item.get("algorithm", algorithm),
-                "description": item.get("description"),
-                "color_stats": item.get("color_stats"),
                 "educational_info": educational_info
             })
         except Exception as e:
@@ -356,29 +403,30 @@ async def search_text(
     
     # 1. Path for TBIR (Keyword Search / Inverted Index Logic)
     if get_type_for_algorithm(algo_upper) == "TBIR":
+        query_words = [w.strip(",") for w in query.lower().split() if len(w) > 1]
+        
         for item in indexed_data:
             desc = (item.get("description") or "").lower()
-            name = item["filename"].lower()
-            # Inverted index simulation: check word intersection
-            item_words = set(desc.split()) | set(name.replace('.', ' ').split())
-            intersection = query_words.intersection(item_words)
+            name = item["filename"].lower().replace('.', ' ')
+            content_pool = f"{desc} {name}"
             
-            if intersection:
-                # Score based on how many query words matched
-                score = (len(intersection) / len(query_words)) * 100
+            matches = []
+            for word in query_words:
+                if word in content_pool:
+                    matches.append(word)
+            
+            if matches:
+                # Better scoring for exact word matches
+                score = (len(matches) / len(query_words)) * 100
                 results.append({
-                    "filename": item["filename"],
-                    "url": item.get("url"),
+                    **format_indexed_item(item),
                     "similarityScore": round(float(score), 1),
-                    "matchesCount": len(intersection),
-                    "algorithm": algo_upper,
-                    "description": item.get("description"),
-                    "color_stats": item.get("color_stats"),
+                    "matchesCount": len(matches),
                     "educational_info": {
                         "method": "Inverted Index",
                         "concept": "Keyword-Based Retrieval",
-                        "details": f"Matched words: {', '.join(intersection)}",
-                        "color_matching": {"query": "N/A (Text Only)", "target": item.get("color_stats")}
+                        "details": f"Matched words: {', '.join(matches)}",
+                        "color_matching": {"query": "Text Only", "target": "N/A (Hidden in TBIR)"}
                     }
                 })
     
@@ -399,18 +447,14 @@ async def search_text(
             similarity = max(5, min(95, similarity + np.random.normal(0, 5)))
             
             results.append({
-                "filename": item["filename"],
-                "url": item.get("url"),
+                **format_indexed_item(item),
                 "similarityScore": round(float(similarity), 1),
                 "matchesCount": 0,
-                "algorithm": "CLIP",
-                "description": item.get("description"),
-                "color_stats": item.get("color_stats"),
                 "educational_info": {
                     "method": "CLIP",
                     "concept": "Multimodal Semantic Matching",
                     "details": "Vector distance in shared Text-Image latent space.",
-                    "color_matching": {"query": "Semantic Text", "target": item.get("color_stats")}
+                    "color_matching": {"query": "Semantic Text", "target": item.get("color_stats") if get_type_for_algorithm(item.get("algorithm")) != "TBIR" else "N/A"}
                 }
             })
 

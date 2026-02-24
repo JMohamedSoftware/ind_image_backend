@@ -7,6 +7,9 @@ import os
 import pickle
 import hashlib
 
+import time
+import uuid
+
 app = FastAPI()
 
 app.add_middleware(
@@ -16,19 +19,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-INDEX_FILE = "index.pkl"
+# Use absolute path for persistence
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INDEX_FILE = os.path.join(BASE_DIR, "index.pkl")
 
 def save_index(data):
-    with open(INDEX_FILE, "wb") as f:
-        pickle.dump(data, f)
+    try:
+        with open(INDEX_FILE, "wb") as f:
+            pickle.dump(data, f)
+        print(f"DATABASE: Saved {len(data)} items to {INDEX_FILE}")
+    except Exception as e:
+        print(f"DATABASE ERROR: Failed to save index: {e}")
 
 def load_index():
     if os.path.exists(INDEX_FILE):
         try:
             with open(INDEX_FILE, "rb") as f:
-                return pickle.load(f)
+                data = pickle.load(f)
+                print(f"DATABASE: Loaded {len(data)} items from {INDEX_FILE}")
+                return data
         except Exception as e:
-            print(f"Error loading index: {e}")
+            print(f"DATABASE ERROR: Failed to load index: {e}")
+    else:
+        print(f"DATABASE: {INDEX_FILE} not found, starting fresh.")
     return []
 
 indexed_data = load_index()
@@ -132,6 +145,7 @@ async def list_indexed_images(type: str = None):
     
     return [
         {
+            "id": img.get("id", img["filename"]), # Fallback for old data
             "filename": img["filename"],
             "url": img.get("url"),
             "algorithm": img.get("algorithm"),
@@ -186,6 +200,7 @@ async def index_image(
         indexed_data = [x for x in indexed_data if x.get("hash") != img_hash and x.get("filename") != target_filename]
         
         indexed_data.append({
+            "id": str(uuid.uuid4()), # Unique stable ID
             "filename": target_filename,
             "url": url if url else None,
             "hash": img_hash,
@@ -194,11 +209,13 @@ async def index_image(
             "type": img_type,
             "keypoint_count": len(kp_coords) if kp_coords else 0,
             "description": description,
-            "color_stats": color_stats
+            "color_stats": color_stats,
+            "indexed_at": time.time()
         })
         save_index(indexed_data)
         return {
             "status": "success",
+            "id": indexed_data[-1]["id"],
             "filename": target_filename,
             "keypoints": len(kp_coords) if kp_coords else 0,
             "algorithm": algorithm.upper(),
@@ -259,24 +276,39 @@ async def search_image(
                 matches = matcher.match(des_query, des_indexed)
                 matches = sorted(matches, key=lambda x: x.distance)
                 
-                # Dynamic threshold based on algorithm
-                dist_thresh = 60 if algo == "SIFT" else 30
+                # More robust thresholds
+                # SIFT (L2): usually 100-200 is good
+                # ORB/AKAZE (Hamming): 50-80 is good for 256-bit
+                if algo == "SIFT":
+                    dist_thresh = 150 
+                elif algo == "ORB":
+                    dist_thresh = 64 # ~25% bits
+                else: # AKAZE
+                    dist_thresh = 100 # AKAZE has longer descriptors
+                
                 good_matches = [m for m in matches if m.distance < dist_thresh]
                 
-                score = (len(good_matches) / max(len(kp_query), 1)) * 100
-                score = min(score * 3.0, 100)
+                # Percentage of query keypoints matched
+                ratio = len(good_matches) / max(len(kp_query), 1)
+                score = min(ratio * 400, 100) # Boost for visibility
                 matches_count = len(good_matches)
             else:
-                # Vector-based similarity (HOG, CNN)
-                # Ensure same shape
-                d1 = des_query.flatten()
-                d2 = des_indexed.flatten()
+                # Vector-based similarity (HOG, CNN, MEANSHIFT)
+                d1 = des_query.flatten().astype(np.float32)
+                d2 = des_indexed.flatten().astype(np.float32)
+                
                 if d1.shape == d2.shape:
-                    dist = np.linalg.norm(d1 - d2)
-                    score = 100 / (1 + dist) # Simple similarity
+                    # Cosine Similarity: (A . B) / (||A|| * ||B||)
+                    dot = np.dot(d1, d2)
+                    norm1 = np.linalg.norm(d1)
+                    norm2 = np.linalg.norm(d2)
+                    if norm1 > 0 and norm2 > 0:
+                        cos_sim = dot / (norm1 * norm2)
+                        score = max(0, min(100, cos_sim * 100))
+                    else:
+                        score = 0
                     matches_count = 0
                 else:
-                    # Fallback for demo: if different shapes (shouldn't happen with same type)
                     score = 0
                     matches_count = 0
 
@@ -292,6 +324,7 @@ async def search_image(
             }
 
             results.append({
+                "id": item.get("id"),
                 "filename": item["filename"],
                 "url": item.get("url"),
                 "similarityScore": round(float(score), 1),

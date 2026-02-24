@@ -258,7 +258,7 @@ async def index_image(
             response = requests.get(url, timeout=10)
             response.raise_for_status()
             contents = response.content
-            target_filename = filename or url.split('/')[-1]
+            target_filename = filename or url.split('/')[-1].split('?')[0]
         except Exception as e:
             return {"error": f"Failed to fetch image from URL: {str(e)}"}
     elif file:

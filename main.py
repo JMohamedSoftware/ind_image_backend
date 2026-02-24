@@ -252,6 +252,7 @@ async def search_image(
     query_text: str = Form(None)
 ):
     contents = None
+    kp_query, des_query, color_query = [], None, [0, 0, 0]
     if url:
         try:
             response = requests.get(url, timeout=10)
@@ -319,6 +320,29 @@ async def search_image(
     # 2. STANDARD CASE: Visual Similarity
     if not contents and not (query_text and algorithm.upper() == "CLIP"):
          return {"results": [], "message": "Provide an image or text (for CLIP)"}
+
+    # Robust Fallback: If visual descriptors failed to extract (e.g. blurry image)
+    # we fall back to color comparison so the user always sees results.
+    if des_query is None and algo != "CLIP":
+        print(f"No visual features for {algo}. Using color fallback.")
+        results = []
+        for item in filtered_db:
+            # Simple color distance score
+            dist = np.linalg.norm(np.array(color_query) - np.array(item["color_stats"]))
+            score = max(0, 100 - (dist / 4.41)) # 4.41 is max possible distance scaled for 0-100
+            results.append({
+                **format_indexed_item(item),
+                "similarityScore": round(float(score), 1),
+                "matchesCount": 0,
+                "educational_info": {
+                    "method": f"{algo} (Color Fallback)",
+                    "concept": f"{algo} failed to find keypoints; falling back to color distribution.",
+                    "details": "When an image is too blurry or lacks contrast, detectors skip it. We use color clusters to maintain search functionality.",
+                    "color_matching": {"query": color_query, "target": item["color_stats"]}
+                }
+            })
+        results = sorted(results, key=lambda x: x["similarityScore"], reverse=True)
+        return {"results": results[:6], "query_keypoints": 0, "query_color_stats": color_query, "message": "Low feature detection - using color-based similarity fallback."}
 
     # Filter indexed data by the EXACT algorithm to ensure descriptor compatibility
     filtered_db = [img for img in indexed_data if img.get("algorithm") == algo]

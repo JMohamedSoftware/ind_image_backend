@@ -418,9 +418,13 @@ async def search_image(
     if des_query is None and algo != "CLIP":
         print(f"No visual features for {algo}. Using color fallback.")
         results = []
+        safe_color_query = color_query if color_query is not None else [128, 128, 128]
         for item in filtered_db:
+            item_color = item.get("color_stats")
+            if not item_color:  # Skip items with no color stats (e.g. TBIR-indexed images)
+                continue
             # Simple color distance score
-            dist = np.linalg.norm(np.array(color_query) - np.array(item["color_stats"]))
+            dist = np.linalg.norm(np.array(safe_color_query) - np.array(item_color))
             score = max(0, 100 - (dist / 4.41)) # 4.41 is max possible distance scaled for 0-100
             results.append({
                 **format_indexed_item(item),
@@ -430,11 +434,12 @@ async def search_image(
                     "method": f"{algo} (Color Fallback)",
                     "concept": f"{algo} failed to find keypoints; falling back to color distribution.",
                     "details": "When an image is too blurry or lacks contrast, detectors skip it. We use color clusters to maintain search functionality.",
-                    "color_matching": {"query": color_query, "target": item["color_stats"]}
+                    "color_matching": {"query": safe_color_query, "target": item_color}
                 }
             })
         results = sorted(results, key=lambda x: x["similarityScore"], reverse=True)
-        return {"results": results[:6], "query_keypoints": 0, "query_color_stats": color_query, "message": "Low feature detection - using color-based similarity fallback."}
+        return {"results": results[:6], "query_keypoints": 0, "query_color_stats": safe_color_query, "message": "Low feature detection - using color-based similarity fallback."}
+
 
     if not filtered_db:
         return {"results": [], "message": f"No images in the {search_type} pool yet. Please index some first!"}
@@ -518,8 +523,9 @@ async def search_image(
             print(f"Error matching: {e}")
             continue
 
+    safe_color_query = color_query if color_query is not None else [128, 128, 128]
     results = sorted(results, key=lambda x: x["similarityScore"], reverse=True)
-    return {"results": results[:6], "query_keypoints": len(kp_query), "query_color_stats": color_query}
+    return {"results": results[:6], "query_keypoints": len(kp_query), "query_color_stats": safe_color_query}
 
 @app.post("/api/search/text")
 async def search_text(

@@ -89,9 +89,9 @@ def load_index():
                             item["descriptors_map"][algo] = features
                             migrated = True
 
-                    # MIGRATION: Re-fetch image and extract CBIR descriptors if missing
+                    # MIGRATION: Re-fetch image and extract CBIR descriptors if missing OR None
                     cbir_algos = CATEGORY_MAP["CBIR"]
-                    missing_cbir = [a for a in cbir_algos if a not in item.get("descriptors_map", {})]
+                    missing_cbir = [a for a in cbir_algos if item.get("descriptors_map", {}).get(a) is None]
                     if missing_cbir and item.get("url"):
                         print(f"MIGRATION: Re-extracting CBIR descriptors for {item.get('filename')} (missing: {missing_cbir})")
                         try:

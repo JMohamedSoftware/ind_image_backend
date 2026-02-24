@@ -125,20 +125,26 @@ def process_image_content(contents, algorithm="ORB", description=None):
         return [], features, color_stats
     elif algo in ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT", "CLIP"]:
         # Simulate feature extraction for educational demo
-        # For CLIP, the user description acts as the "Semantic Seed" (Labeling/Classification)
+        # Salted Seed: adding algo name ensures different algos produce different rankings (DIVERSITY)
+        algo_salt = hashlib.md5(algo.encode()).hexdigest()[:4]
         if algo == "CLIP" and description:
-            seed_text = description.lower().strip()
-            np.random.seed(int(hashlib.md5(seed_text.encode()).hexdigest()[:8], 16) % 2**32)
+            seed_text = f"{description.lower().strip()}_{algo_salt}"
         else:
-            np.random.seed(int(get_image_hash(contents)[:8], 16) % 2**32)
+            img_hash = get_image_hash(contents)
+            seed_text = f"{img_hash[:8]}_{algo_salt}"
             
-        # Different lengths for different algos to match Academic Specifications in frontend
+        np.random.seed(int(hashlib.md5(seed_text.encode()).hexdigest()[:8], 16) % 2**32)
+            
+        # Different lengths for different algos
         if algo == "CNN": length = 4096
         elif algo == "CLIP": length = 512
         elif algo == "SVM": length = 64
         elif algo == "MEANSHIFT": length = 16
         else: length = 32
-        features = np.random.rand(length).astype(np.float32)
+        
+        # Use randn (not rand) for centered distributions and normalize to unit length
+        features = np.random.randn(length).astype(np.float32)
+        features /= (np.linalg.norm(features) + 1e-8) # L2 Normalization
         return [], features, color_stats
     
     detector = get_detector(algo)
@@ -369,6 +375,9 @@ async def search_image(
     if not contents and not (query_text and algorithm.upper() == "CLIP"):
          return {"results": [], "message": "Provide an image or text (for CLIP)"}
 
+    # Filter indexed data by the SAME CATEGORY (Type) to allow cross-algorithm sharing
+    filtered_db = [img for img in indexed_data if img.get("type", "CBIR") == search_type]
+    
     # Robust Fallback: If visual descriptors failed to extract (e.g. blurry image)
     # we fall back to color comparison so the user always sees results.
     if des_query is None and algo != "CLIP":
@@ -392,8 +401,6 @@ async def search_image(
         results = sorted(results, key=lambda x: x["similarityScore"], reverse=True)
         return {"results": results[:6], "query_keypoints": 0, "query_color_stats": color_query, "message": "Low feature detection - using color-based similarity fallback."}
 
-    # Filter indexed data by the SAME CATEGORY (Type) to allow cross-algorithm sharing
-    filtered_db = [img for img in indexed_data if img.get("type", "CBIR") == search_type]
     if not filtered_db:
         return {"results": [], "message": f"No images in the {search_type} pool yet. Please index some first!"}
 
@@ -402,10 +409,6 @@ async def search_image(
         des_map = item.get("descriptors_map", {})
         des_indexed = des_map.get(algo)
         
-        # Backward compatibility fallback
-        if des_indexed is None and item.get("algorithm") == algo:
-            des_indexed = item.get("descriptors")
-            
         if des_indexed is None or len(des_indexed) == 0:
             continue
             
@@ -492,21 +495,24 @@ async def search_text(
     
     # 1. Path for TBIR (Keyword Search / Inverted Index Logic)
     if get_type_for_algorithm(algo_upper) == "TBIR":
-        query_words = [w.strip(",") for w in query.lower().split() if len(w) > 1]
-        
-        for item in indexed_data:
-            desc = (item.get("description") or "").lower()
-            name = item["filename"].lower().replace('.', ' ')
-            content_pool = f"{desc} {name}"
+            query_words_clean = [w.strip(",.!?") for w in query.lower().split() if len(w) > 2]
+            if not query_words_clean: query_words_clean = [query.lower().strip()]
             
-            matches = []
-            for word in query_words:
-                if word in content_pool:
-                    matches.append(word)
-            
-            if matches:
-                # Better scoring for exact word matches
-                score = (len(matches) / len(query_words)) * 100
+            for item in indexed_data:
+                desc = (item.get("description") or "").lower()
+                name = item["filename"].lower().replace('.', ' ')
+                content_pool = f"{desc} {name}"
+                
+                matches = []
+                for word in query_words_clean:
+                    # Strict word boundary match to avoid partial matches like "car" in "carpet"
+                    if f" {word} " in f" {content_pool} ":
+                        matches.append(word)
+                
+                if matches:
+                    # Better scoring for exact word matches (Jaccard-ish)
+                    # Unique matches / Total query words
+                    score = (len(list(set(matches))) / len(list(set(query_words_clean)))) * 100
                 results.append({
                     **format_indexed_item(item),
                     "similarityScore": round(float(score), 1),
@@ -522,18 +528,23 @@ async def search_text(
     # 2. Path for DL (Semantic CLIP Search)
     else:
         # Simulate CLIP-style matching
-        query_hash = hashlib.md5(query.lower().strip().encode()).hexdigest()
+        algo_salt = hashlib.md5(algo_upper.encode()).hexdigest()[:4]
+        query_hash = hashlib.md5(f"{query.lower().strip()}_{algo_salt}".encode()).hexdigest()
         np.random.seed(int(query_hash[:8], 16) % 2**32)
-        text_embedding = np.random.rand(128).astype(np.float32)
+        text_embedding = np.random.randn(128).astype(np.float32)
+        text_embedding /= (np.linalg.norm(text_embedding) + 1e-8)
         
         for item in indexed_data:
-            seed_source = item.get("hash", item["filename"])
+            seed_source = f"{item.get('hash', item['filename'])}_{algo_salt}"
             np.random.seed(int(hashlib.md5(seed_source.encode()).hexdigest()[:8], 16) % 2**32)
-            img_embedding = np.random.rand(128).astype(np.float32)
+            img_embedding = np.random.randn(128).astype(np.float32)
+            img_embedding /= (np.linalg.norm(img_embedding) + 1e-8)
             
-            # Simulated CLIP similarity score
+            # Simulated Cosine Similarity (Dot product of normalized vectors)
             similarity = np.dot(text_embedding, img_embedding) * 100
-            similarity = max(5, min(95, similarity + np.random.normal(0, 5)))
+            # Scale to UX range but keep variance
+            similarity = max(5, min(98, (similarity + 1) * 45)) # Range -1..1 shifted to roughly 0..90
+            similarity += np.random.normal(0, 2)
             
             results.append({
                 **format_indexed_item(item),

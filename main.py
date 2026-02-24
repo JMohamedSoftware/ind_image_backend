@@ -449,27 +449,33 @@ async def search_image(
             
         try:
             if algo in ["SIFT", "ORB", "AKAZE"]:
+                # Ensure correct dtype for matcher
+                q = np.array(des_query, dtype=np.float32 if algo == "SIFT" else np.uint8)
+                idx_d = np.array(des_indexed, dtype=np.float32 if algo == "SIFT" else np.uint8)
+                
+                if q.ndim != 2 or idx_d.ndim != 2:
+                    continue  # Skip malformed descriptors
+                
                 matcher = get_matcher(algo)
-                matches = matcher.match(des_query, des_indexed)
+                matches = matcher.match(q, idx_d)
                 matches = sorted(matches, key=lambda x: x.distance)
                 
-                # More robust thresholds
-                # SIFT (L2): usually 100-200 is good
-                # ORB/AKAZE (Hamming): 50-80 is good for 256-bit
-                if algo == "SIFT":
-                    dist_thresh = 100 
-                elif algo == "ORB":
-                    dist_thresh = 48 
-                elif algo == "AKAZE":
-                    dist_thresh = 80 # AKAZE (MLDB) is very stable, 80 is a good Hamming threshold
-                else: 
-                    dist_thresh = 100
+                # Thresholds: distances are algorithm-specific
+                if algo == "SIFT":   dist_thresh = 200  # SIFT L2 distances can be large (float)
+                elif algo == "ORB":  dist_thresh = 64   # ORB Hamming distance (8-bit, 256 bits)
+                elif algo == "AKAZE": dist_thresh = 80
+                else: dist_thresh = 100
                 
                 good_matches = [m for m in matches if m.distance < dist_thresh]
                 
-                # RELIABILITY BOOST
-                ratio = len(good_matches) / max(len(kp_query), 1)
-                score = min(ratio * 500, 100)
+                # Score: use best-match distance ratio for richer diversity
+                if len(matches) > 0:
+                    best_dist = matches[0].distance
+                    normalized = 1 - min(best_dist / (dist_thresh * 2), 1.0)
+                    count_ratio = len(good_matches) / max(len(kp_query), 1)
+                    score = min((normalized * 0.4 + count_ratio * 0.6) * 100, 100)
+                else:
+                    score = 0
                 matches_count = len(good_matches)
             else:
                 # Vector-based similarity (HOG, CNN, MEANSHIFT, etc.)

@@ -505,13 +505,20 @@ async def search_image(
                 else: dist_thresh = 100
                 
                 good_matches = [m for m in matches if m.distance < dist_thresh]
-                
-                # Score: use best-match distance ratio for richer diversity
-                if len(matches) > 0:
+
+                # Minimum required good matches before given a meaningful score
+                min_good = 4 if algo in ["ORB", "AKAZE"] else 3
+
+                # Score: needs enough good matches to be relevant
+                if len(good_matches) >= min_good:
                     best_dist = matches[0].distance
                     normalized = 1 - min(best_dist / (dist_thresh * 2), 1.0)
                     count_ratio = len(good_matches) / max(len(kp_query), 1)
-                    score = min((normalized * 0.4 + count_ratio * 0.6) * 100, 100)
+                    # count_ratio weighted heavily — more shared keypoints = more similar
+                    score = min((normalized * 0.3 + count_ratio * 0.7) * 100, 100)
+                elif len(good_matches) > 0:
+                    # Very few matches — give a very low score (< 10)
+                    score = (len(good_matches) / min_good) * 10
                 else:
                     score = 0
                 matches_count = len(good_matches)

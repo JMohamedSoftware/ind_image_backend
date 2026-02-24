@@ -56,6 +56,27 @@ def extract_hog(img):
     h = hog.compute(gray)
     return h.flatten()
 
+def get_color_histogram(img):
+    # Simple RGB average percentages for education
+    # Convert to RGB (OpenCV uses BGR)
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    avg_color = np.mean(img_rgb, axis=(0, 1))
+    total = np.sum(avg_color)
+    if total == 0: return {"r": 33, "g": 33, "b": 33}
+    return {
+        "r": round((avg_color[0] / total) * 100, 1),
+        "g": round((avg_color[1] / total) * 100, 1),
+        "b": round((avg_color[2] / total) * 100, 1)
+    }
+
+def get_type_for_algorithm(algo):
+    algo = algo.upper()
+    if algo == "CLIP": return "DL"
+    if algo in ["CNN", "MEANSHIFT"]: return "DL" # MeanShift is Segment in guide, putting in CBIR usually but DL in my specific mapping or separate
+    if algo.startswith("TBIR"): return "TBIR"
+    if algo in ["SIFT", "ORB", "AKAZE", "HOG"]: return "CBIR"
+    return "CBIR" # Default
+
 def process_image_content(contents, algorithm="ORB"):
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -63,10 +84,11 @@ def process_image_content(contents, algorithm="ORB"):
         return None
     
     algo = algorithm.upper()
+    color_stats = get_color_histogram(img)
     
     if algo == "HOG":
         features = extract_hog(img)
-        return [], features
+        return [], features, color_stats
     elif algo in ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT"]:
         # Simulate feature extraction for educational demo
         np.random.seed(int(get_image_hash(contents)[:8], 16) % 2**32)
@@ -76,13 +98,13 @@ def process_image_content(contents, algorithm="ORB"):
         elif algo == "MEANSHIFT": length = 16
         else: length = 32
         features = np.random.rand(length).astype(np.float32)
-        return [], features
+        return [], features, color_stats
     
     detector = get_detector(algo)
     if detector:
         kp, des = detector.detectAndCompute(img, None)
         kp_coords = [(int(k.pt[0]), int(k.pt[1])) for k in kp] if kp else []
-        return kp_coords, des
+        return kp_coords, des, color_stats
     
     return None
 
@@ -100,16 +122,23 @@ async def root():
     return {"message": "Visual Search API — Educational Edition"}
 
 @app.get("/api/index/list")
-async def list_indexed_images():
+async def list_indexed_images(type: str = None):
     # Return minimal metadata for the gallery
+    filtered = indexed_data
+    if type:
+        filtered = [img for img in indexed_data if img.get("type", "CBIR") == type.upper()]
+    
     return [
         {
             "filename": img["filename"],
             "url": img.get("url"),
             "algorithm": img.get("algorithm"),
-            "keypoint_count": img.get("keypoint_count", 0)
+            "keypoint_count": img.get("keypoint_count", 0),
+            "description": img.get("description"),
+            "type": img.get("type", "CBIR"),
+            "color_stats": img.get("color_stats")
         }
-        for img in indexed_data
+        for img in filtered
     ]
 
 @app.post("/api/index")
@@ -141,9 +170,13 @@ async def index_image(
     if result is None:
         return {"status": "error", "message": "Could not decode image or unsupported algorithm"}
 
-    kp_coords, des = result
-
-    if des is not None and len(des) > 0:
+    kp_coords, des, color_stats = result # Now returns color_stats
+    
+    # Determine type based on algorithm or presence of description
+    img_type = get_type_for_algorithm(algorithm)
+    # If it's TBIR, we essentially use common fields
+    
+    if des is not None or algorithm.upper() == "TBIR":
         global indexed_data
         # Remove any existing entry with the same hash OR filename
         indexed_data = [x for x in indexed_data if x.get("hash") != img_hash and x.get("filename") != target_filename]
@@ -154,8 +187,10 @@ async def index_image(
             "hash": img_hash,
             "descriptors": des,
             "algorithm": algorithm.upper(),
+            "type": img_type,
             "keypoint_count": len(kp_coords),
-            "description": description
+            "description": description,
+            "color_stats": color_stats
         })
         save_index(indexed_data)
         return {
@@ -163,6 +198,8 @@ async def index_image(
             "filename": target_filename,
             "keypoints": len(kp_coords),
             "algorithm": algorithm.upper(),
+            "type": img_type,
+            "color_stats": color_stats,
             "keypoint_coords": kp_coords[:50],
         }
 
@@ -191,18 +228,23 @@ async def search_image(
     if result is None:
         return {"results": [], "message": "Could not decode image"}
 
-    kp_query, des_query = result
+    kp_query, des_query, color_query = result
 
     if des_query is None or len(des_query) == 0:
         return {"results": [], "message": "No features found in query image"}
 
-    if not indexed_data:
-        return {"results": [], "message": "No images indexed yet."}
+    # Filter indexed data by the SAME type as requested SEARCH algorithm
+    search_type = get_type_for_algorithm(algorithm)
+    # Corrected filter: Only search against images indexed with same TYPE
+    filtered_db = [img for img in indexed_data if img.get("type", "CBIR") == search_type]
+
+    if not filtered_db:
+        return {"results": [], "message": f"No images indexed for type {search_type} yet."}
 
     algo = algorithm.upper()
     results = []
 
-    for item in indexed_data:
+    for item in filtered_db:
         des_indexed = item["descriptors"]
         if des_indexed is None or len(des_indexed) == 0:
             continue
@@ -230,8 +272,20 @@ async def search_image(
                     score = 100 / (1 + dist) # Simple similarity
                     matches_count = 0
                 else:
+                    # Fallback for demo: if different shapes (shouldn't happen with same type)
                     score = 0
                     matches_count = 0
+
+            # Pedagogical visual info: distances/percentages
+            educational_info = {
+                "method": algo,
+                "concept": f"Similarity calculated using {algo} features.",
+                "details": "Deep Learning" if algo == "CNN" else "Structural features" if algo == "HOG" else "Keypoint matching",
+                "color_matching": {
+                    "query": color_query,
+                    "target": item.get("color_stats")
+                }
+            }
 
             results.append({
                 "filename": item["filename"],
@@ -240,18 +294,15 @@ async def search_image(
                 "matchesCount": int(matches_count),
                 "algorithm": item.get("algorithm", algorithm),
                 "description": item.get("description"),
-                "educational_info": {
-                    "method": algo,
-                    "concept": f"Similarity calculated using {algo} features.",
-                    "details": "Deep Learning" if algo == "CNN" else "Structural features" if algo == "HOG" else "Keypoint matching"
-                }
+                "color_stats": item.get("color_stats"),
+                "educational_info": educational_info
             })
         except Exception as e:
             print(f"Error matching: {e}")
             continue
 
     results = sorted(results, key=lambda x: x["similarityScore"], reverse=True)
-    return {"results": results[:6], "query_keypoints": len(kp_query)}
+    return {"results": results[:6], "query_keypoints": len(kp_query), "query_color_stats": color_query}
 
 @app.post("/api/search/text")
 async def search_text(
@@ -288,27 +339,26 @@ async def search_text(
         norm_b = np.linalg.norm(img_embedding)
         similarity = dot / (norm_a * norm_b)
         
-        # Boost score if words match (very basic mock logic)
-        score = similarity * 100
-        words = query.lower().split()
-        meta_text = (item["filename"] + " " + (item.get("description") or "")).lower()
-        for w in words:
-            if w in meta_text:
-                score += 25
-        
-        score = min(max(score, 10), 98.5) # Keep it realistic
+        # Simulated CLIP similarity score
+        similarity = np.dot(text_embedding, img_embedding) * 100
+        similarity = max(5, min(95, similarity + np.random.normal(0, 5)))
         
         results.append({
             "filename": item["filename"],
             "url": item.get("url"),
-            "similarityScore": round(float(score), 1),
+            "similarityScore": round(float(similarity), 1),
             "matchesCount": 0,
             "algorithm": "CLIP",
             "description": item.get("description"),
+            "color_stats": item.get("color_stats"),
             "educational_info": {
                 "method": "CLIP",
-                "concept": "Multimodal Embedding Alignment",
-                "details": f"Text query '{query}' projected to 128D latent space and matched against image embeddings."
+                "concept": "Multimodal Semantic Matching",
+                "details": "Vector distance in shared Text-Image latent space.",
+                "color_matching": {
+                    "query": "Semantic Text",
+                    "target": item.get("color_stats")
+                }
             }
         })
 
@@ -351,8 +401,9 @@ async def cluster_data(k: int = Form(5)):
 @app.delete("/api/index")
 async def clear_index():
     global indexed_data
-    indexed_data = []
+    indexed_data.clear()
     save_index(indexed_data)
+    print("Database cleared successfully.")
     return {"status": "cleared"}
 
 if __name__ == "__main__":

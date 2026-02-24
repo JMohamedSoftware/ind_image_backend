@@ -106,7 +106,9 @@ def process_image_content(contents, algorithm="ORB"):
         kp_coords = [(int(k.pt[0]), int(k.pt[1])) for k in kp] if kp else []
         return kp_coords, des, color_stats
     
-    return None
+    # Handle TBIR or unknown algorithms by returning empty features instead of None
+    # This prevents the indexer from failing due to "No features found"
+    return [], None, color_stats
 
 def get_matcher(algorithm: str):
     algo = algorithm.upper() if algorithm else "ORB"
@@ -176,7 +178,9 @@ async def index_image(
     img_type = get_type_for_algorithm(algorithm)
     # If it's TBIR, we essentially use common fields
     
-    if des is not None or algorithm.upper() == "TBIR":
+    # If it's TBIR or we have descriptors, save it
+    # Note: For TBIR, 'descriptors' will be None but we still index it
+    if des is not None or img_type == "TBIR":
         global indexed_data
         # Remove any existing entry with the same hash OR filename
         indexed_data = [x for x in indexed_data if x.get("hash") != img_hash and x.get("filename") != target_filename]
@@ -188,7 +192,7 @@ async def index_image(
             "descriptors": des,
             "algorithm": algorithm.upper(),
             "type": img_type,
-            "keypoint_count": len(kp_coords),
+            "keypoint_count": len(kp_coords) if kp_coords else 0,
             "description": description,
             "color_stats": color_stats
         })
@@ -196,14 +200,14 @@ async def index_image(
         return {
             "status": "success",
             "filename": target_filename,
-            "keypoints": len(kp_coords),
+            "keypoints": len(kp_coords) if kp_coords else 0,
             "algorithm": algorithm.upper(),
             "type": img_type,
             "color_stats": color_stats,
-            "keypoint_coords": kp_coords[:50],
+            "keypoint_coords": kp_coords[:50] if kp_coords else [],
         }
 
-    return {"status": "error", "message": "No features found in image"}
+    return {"status": "error", "message": "No features found in image for chosen algorithm"}
 
 @app.post("/api/search")
 async def search_image(
@@ -312,55 +316,70 @@ async def search_text(
     if not indexed_data:
         return {"results": [], "message": "No images indexed yet."}
 
-    # Simulate Text-to-Image Embedding Matching (CLIP-style)
-    # We use a simple hash-based seed to make results "consistent" for the demo
-    query_hash = hashlib.md5(query.lower().strip().encode()).hexdigest()
-    np.random.seed(int(query_hash[:8], 16) % 2**32)
-    
-    # Generate a mock 128-float text embedding
-    text_embedding = np.random.rand(128).astype(np.float32)
+    algo_upper = algorithm.upper()
+    query_words = set(query.lower().strip().split())
     
     results = []
-    for item in indexed_data:
-        # For the demo, we simulate image embeddings as 128-float vectors
-        # If the image was indexed with CNN/CLIP, we use its descriptors. 
-        # Otherwise, we create a mock "semantic" vector for matching purposes
-        img_descriptors = item["descriptors"]
+    
+    # 1. Path for TBIR (Keyword Search / Inverted Index Logic)
+    if get_type_for_algorithm(algo_upper) == "TBIR":
+        for item in indexed_data:
+            desc = (item.get("description") or "").lower()
+            name = item["filename"].lower()
+            # Inverted index simulation: check word intersection
+            item_words = set(desc.split()) | set(name.replace('.', ' ').split())
+            intersection = query_words.intersection(item_words)
+            
+            if intersection:
+                # Score based on how many query words matched
+                score = (len(intersection) / len(query_words)) * 100
+                results.append({
+                    "filename": item["filename"],
+                    "url": item.get("url"),
+                    "similarityScore": round(float(score), 1),
+                    "matchesCount": len(intersection),
+                    "algorithm": algo_upper,
+                    "description": item.get("description"),
+                    "color_stats": item.get("color_stats"),
+                    "educational_info": {
+                        "method": "Inverted Index",
+                        "concept": "Keyword-Based Retrieval",
+                        "details": f"Matched words: {', '.join(intersection)}",
+                        "color_matching": {"query": "N/A (Text Only)", "target": item.get("color_stats")}
+                    }
+                })
+    
+    # 2. Path for DL (Semantic CLIP Search)
+    else:
+        # Simulate CLIP-style matching
+        query_hash = hashlib.md5(query.lower().strip().encode()).hexdigest()
+        np.random.seed(int(query_hash[:8], 16) % 2**32)
+        text_embedding = np.random.rand(128).astype(np.float32)
         
-        # Simulate projection into the same latent space
-        # In a real CLIP, this is where the Cosine Similarity happens
-        seed_source = item.get("hash", item["filename"])
-        np.random.seed(int(hashlib.md5(seed_source.encode()).hexdigest()[:8], 16) % 2**32)
-        img_embedding = np.random.rand(128).astype(np.float32)
-        
-        # Calculate cosine similarity (simulated)
-        dot = np.dot(text_embedding, img_embedding)
-        norm_a = np.linalg.norm(text_embedding)
-        norm_b = np.linalg.norm(img_embedding)
-        similarity = dot / (norm_a * norm_b)
-        
-        # Simulated CLIP similarity score
-        similarity = np.dot(text_embedding, img_embedding) * 100
-        similarity = max(5, min(95, similarity + np.random.normal(0, 5)))
-        
-        results.append({
-            "filename": item["filename"],
-            "url": item.get("url"),
-            "similarityScore": round(float(similarity), 1),
-            "matchesCount": 0,
-            "algorithm": "CLIP",
-            "description": item.get("description"),
-            "color_stats": item.get("color_stats"),
-            "educational_info": {
-                "method": "CLIP",
-                "concept": "Multimodal Semantic Matching",
-                "details": "Vector distance in shared Text-Image latent space.",
-                "color_matching": {
-                    "query": "Semantic Text",
-                    "target": item.get("color_stats")
+        for item in indexed_data:
+            seed_source = item.get("hash", item["filename"])
+            np.random.seed(int(hashlib.md5(seed_source.encode()).hexdigest()[:8], 16) % 2**32)
+            img_embedding = np.random.rand(128).astype(np.float32)
+            
+            # Simulated CLIP similarity score
+            similarity = np.dot(text_embedding, img_embedding) * 100
+            similarity = max(5, min(95, similarity + np.random.normal(0, 5)))
+            
+            results.append({
+                "filename": item["filename"],
+                "url": item.get("url"),
+                "similarityScore": round(float(similarity), 1),
+                "matchesCount": 0,
+                "algorithm": "CLIP",
+                "description": item.get("description"),
+                "color_stats": item.get("color_stats"),
+                "educational_info": {
+                    "method": "CLIP",
+                    "concept": "Multimodal Semantic Matching",
+                    "details": "Vector distance in shared Text-Image latent space.",
+                    "color_matching": {"query": "Semantic Text", "target": item.get("color_stats")}
                 }
-            }
-        })
+            })
 
     results = sorted(results, key=lambda x: x["similarityScore"], reverse=True)
     return {"results": results[:6]}

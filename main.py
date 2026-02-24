@@ -88,6 +88,39 @@ def load_index():
                             features /= (np.linalg.norm(features) + 1e-8)
                             item["descriptors_map"][algo] = features
                             migrated = True
+
+                    # MIGRATION: Re-fetch image and extract CBIR descriptors if missing
+                    cbir_algos = CATEGORY_MAP["CBIR"]
+                    missing_cbir = [a for a in cbir_algos if a not in item.get("descriptors_map", {})]
+                    if missing_cbir and item.get("url"):
+                        print(f"MIGRATION: Re-extracting CBIR descriptors for {item.get('filename')} (missing: {missing_cbir})")
+                        try:
+                            import requests as _req
+                            r = _req.get(item["url"], timeout=10)
+                            r.raise_for_status()
+                            img_contents = r.content
+                            nparr = np.frombuffer(img_contents, np.uint8)
+                            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                            if img is not None:
+                                for cbir_algo in missing_cbir:
+                                    try:
+                                        if cbir_algo == "HOG":
+                                            features = extract_hog(img)
+                                            item["descriptors_map"][cbir_algo] = features
+                                        else:
+                                            det = get_detector(cbir_algo)
+                                            if det:
+                                                kp, des = det.detectAndCompute(img, None)
+                                                item["descriptors_map"][cbir_algo] = des
+                                        print(f"  {cbir_algo}: OK")
+                                    except Exception as e2:
+                                        print(f"  {cbir_algo}: failed ({e2})")
+                                if not item.get("color_stats"):
+                                    item["color_stats"] = get_color_histogram(img)
+                                migrated = True
+                        except Exception as e:
+                            print(f"MIGRATION: Could not re-fetch {item.get('url')}: {e}")
+
                 
                 if migrated:
                     print("MIGRATION COMPLETE: Saving updated database.")

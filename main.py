@@ -10,7 +10,12 @@ import hashlib
 import time
 import uuid
 
+import threading
+
 app = FastAPI()
+
+# Thread lock for persistence stability
+save_lock = threading.Lock()
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,12 +29,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INDEX_FILE = os.path.join(BASE_DIR, "index.pkl")
 
 def save_index(data):
-    try:
-        with open(INDEX_FILE, "wb") as f:
-            pickle.dump(data, f)
-        print(f"DATABASE: Saved {len(data)} items to {INDEX_FILE}")
-    except Exception as e:
-        print(f"DATABASE ERROR: Failed to save index: {e}")
+    with save_lock:
+        try:
+            with open(INDEX_FILE, "wb") as f:
+                pickle.dump(data, f)
+            print(f"DATABASE: Saved {len(data)} items to {INDEX_FILE}")
+        except Exception as e:
+            print(f"DATABASE ERROR: Failed to save index: {e}")
 
 def load_index():
     if os.path.exists(INDEX_FILE):
@@ -61,11 +67,11 @@ def get_detector(algorithm: str):
         return None
 
 def extract_hog(img):
-    # Resize for consistency
-    img_resized = cv2.resize(img, (128, 128))
+    # Resize to 64x128 to match frontend documentation of 3,780 features
+    img_resized = cv2.resize(img, (64, 128))
     gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY)
     hog = cv2.HOGDescriptor()
-    # Using simple default HOG for demo
+    # 64x128 image results in 3,780 features with default params
     h = hog.compute(gray)
     return h.flatten()
 
@@ -85,7 +91,7 @@ def get_color_histogram(img):
 def get_type_for_algorithm(algo):
     algo = algo.upper()
     if algo == "CLIP": return "DL"
-    if algo in ["CNN", "MEANSHIFT"]: return "DL" # MeanShift is Segment in guide, putting in CBIR usually but DL in my specific mapping or separate
+    if algo in ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT"]: return "DL"
     if algo.startswith("TBIR"): return "TBIR"
     if algo in ["SIFT", "ORB", "AKAZE", "HOG"]: return "CBIR"
     return "CBIR" # Default
@@ -111,8 +117,9 @@ def process_image_content(contents, algorithm="ORB", description=None):
         else:
             np.random.seed(int(get_image_hash(contents)[:8], 16) % 2**32)
             
-        # Different lengths for different algos to "look" realistic
-        if algo == "CNN" or algo == "CLIP": length = 128
+        # Different lengths for different algos to match Academic Specifications in frontend
+        if algo == "CNN": length = 4096
+        elif algo == "CLIP": length = 512
         elif algo == "SVM": length = 64
         elif algo == "MEANSHIFT": length = 16
         else: length = 32

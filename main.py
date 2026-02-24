@@ -73,11 +73,11 @@ def get_image_hash(contents):
 def get_detector(algorithm: str):
     algo = algorithm.upper() if algorithm else "ORB"
     if algo == "SIFT":
-        return cv2.SIFT_create(nfeatures=500)
+        return cv2.SIFT_create(nfeatures=1000, contrastThreshold=0.04)
     elif algo == "AKAZE":
         return cv2.AKAZE_create()
     elif algo == "ORB":
-        return cv2.ORB_create(nfeatures=1000)
+        return cv2.ORB_create(nfeatures=2000, scaleFactor=1.2, nlevels=8)
     else:
         return None
 
@@ -419,20 +419,22 @@ async def search_image(
                 # SIFT (L2): usually 100-200 is good
                 # ORB/AKAZE (Hamming): 50-80 is good for 256-bit
                 if algo == "SIFT":
-                    dist_thresh = 150 
+                    dist_thresh = 100 
                 elif algo == "ORB":
-                    dist_thresh = 64 # ~25% bits
-                else: # AKAZE
-                    dist_thresh = 100 # AKAZE has longer descriptors
+                    dist_thresh = 48 
+                elif algo == "AKAZE":
+                    dist_thresh = 80 # AKAZE (MLDB) is very stable, 80 is a good Hamming threshold
+                else: 
+                    dist_thresh = 100
                 
                 good_matches = [m for m in matches if m.distance < dist_thresh]
                 
-                # Percentage of query keypoints matched
+                # RELIABILITY BOOST
                 ratio = len(good_matches) / max(len(kp_query), 1)
-                score = min(ratio * 400, 100) # Boost for visibility
+                score = min(ratio * 500, 100)
                 matches_count = len(good_matches)
             else:
-                # Vector-based similarity (HOG, CNN, MEANSHIFT)
+                # Vector-based similarity (HOG, CNN, MEANSHIFT, etc.)
                 d1 = des_query.flatten().astype(np.float32)
                 d2 = des_indexed.flatten().astype(np.float32)
                 
@@ -440,9 +442,11 @@ async def search_image(
                     dot = np.dot(d1, d2)
                     norm1 = np.linalg.norm(d1)
                     norm2 = np.linalg.norm(d2)
-                    if norm1 > 0 and norm2 > 0:
+                    if norm1 > 1e-6 and norm2 > 1e-6: # Prevent division by zero
                         cos_sim = dot / (norm1 * norm2)
-                        score = max(0, min(100, cos_sim * 100))
+                        # HOG similarity often naturally sits high, let's scale it for better UX
+                        # (cos_sim - bias) / scale
+                        score = max(0, min(100, (cos_sim - 0.5) * 200)) if algo == "HOG" else max(0, min(100, cos_sim * 100))
                     else:
                         score = 0
                     matches_count = 0

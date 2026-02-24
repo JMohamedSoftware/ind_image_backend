@@ -548,17 +548,17 @@ async def search_text(
                     # Better scoring for exact word matches (Jaccard-ish)
                     # Unique matches / Total query words
                     score = (len(list(set(matches))) / len(list(set(query_words_clean)))) * 100
-                results.append({
-                    **format_indexed_item(item),
-                    "similarityScore": round(float(score), 1),
-                    "matchesCount": len(matches),
-                    "educational_info": {
-                        "method": "Inverted Index",
-                        "concept": "Keyword-Based Retrieval",
-                        "details": f"Matched words: {', '.join(matches)}",
-                        "color_matching": {"query": "Text Only", "target": "N/A (Hidden in TBIR)"}
-                    }
-                })
+                    results.append({
+                        **format_indexed_item(item),
+                        "similarityScore": round(float(score), 1),
+                        "matchesCount": len(matches),
+                        "educational_info": {
+                            "method": "Inverted Index",
+                            "concept": "Keyword-Based Retrieval",
+                            "details": f"Matched words: {', '.join(matches)}",
+                            "color_matching": {"query": "Text Only", "target": "N/A (Hidden in TBIR)"}
+                        }
+                    })
     
     # 2. Path for DL (Semantic CLIP Search)
     else:

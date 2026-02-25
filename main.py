@@ -207,11 +207,11 @@ def process_image_content(contents, algorithm="ORB", description=None):
         # Salted Seed: adding algo name ensures different algos produce different rankings (DIVERSITY)
         algo_salt = hashlib.md5(algo.encode()).hexdigest()[:4]
         
-        # Ensure seed_text is ALWAYS defined for robustness
-        img_hash = get_image_hash(contents) if contents else "00000000"
-        if algo == "CLIP" and description:
+        # Use description if available for ALL DL algorithms (enables text search for CNN, SVM, etc.)
+        if description:
             seed_text = f"{description.lower().strip()}_{algo_salt}"
         else:
+            img_hash = get_image_hash(contents) if contents else "00000000"
             seed_text = f"{img_hash[:8]}_{algo_salt}"
             
         np.random.seed(int(hashlib.md5(seed_text.encode()).hexdigest()[:8], 16) % 2**32)
@@ -440,16 +440,33 @@ async def search_image(
             concept_text = f"Semantic matching for '{query_text}'"
             
         for item in indexed_data:
-            seed_source = item.get("hash", item["filename"])
-            np.random.seed(int(hashlib.md5(seed_source.encode()).hexdigest()[:8], 16) % 2**32)
-            img_embedding = np.random.rand(128).astype(np.float32)
+            # Use the STORED descriptor if available, otherwise fallback to hash-based simulation
+            stored_des = item.get("descriptors_map", {}).get(algo)
             
+            if stored_des is not None:
+                img_embedding = np.array(stored_des, dtype=np.float32)
+            else:
+                # Need algo_salt for consistent random generation across text/image search
+                algo_salt = hashlib.md5(algo.encode()).hexdigest()[:4]
+                seed_source = f"{item.get('hash', item['filename'])}_{algo_salt}"
+                np.random.seed(int(hashlib.md5(seed_source.encode()).hexdigest()[:8], 16) % 2**32)
+                img_embedding = np.random.randn(128).astype(np.float32)
+                img_embedding /= (np.linalg.norm(img_embedding) + 1e-8) # Normalize random vectors
+            
+            # Ensure shape is 128 (flattened)
+            img_embedding = img_embedding[:128].flatten()
+            if img_embedding.shape[0] < 128:
+                img_embedding = np.pad(img_embedding, (0, 128 - img_embedding.shape[0]))
+
             similarity = np.dot(final_query_embedding, img_embedding) * 100
-            similarity = max(5, min(95, similarity + np.random.normal(0, 3)))
+            
+            # If query == description (exact match in simulation), it will be 100
+            # Otherwise random vectors dot product will be low.
+            score = max(0, min(100, similarity))
             
             results.append({
                 **format_indexed_item(item),
-                "similarityScore": round(float(similarity), 1),
+                "similarityScore": round(float(score), 1),
                 "matchesCount": 0,
                 "educational_info": {
                     "method": method_name,
@@ -563,11 +580,10 @@ async def search_image(
                     if norm1 > 1e-6 and norm2 > 1e-6: # Prevent division by zero
                         cos_sim = dot / (norm1 * norm2)
                         
-                        # HOG similarity often naturally sits extremely high (> 0.9)
-                        # We use a higher bias and steeper scale to make it discriminative
-                        # Match 0.85 -> 0%, 1.0 -> 100%
+                        # HOG similarity often naturally sits between 0.7 and 0.95
+                        # Relaxed bias to 0.7 (Map 0.7 -> 0%, 1.0 -> 100%)
                         if algo == "HOG":
-                            score = max(0, min(100, (cos_sim - 0.85) * 666))
+                            score = max(0, min(100, (cos_sim - 0.7) * 333))
                             print(f"HOG Debug: cos_sim={cos_sim:.4f}, score={score:.1f}%")
                         else:
                             score = max(0, min(100, cos_sim * 100))
@@ -662,25 +678,34 @@ async def search_text(
         text_embedding /= (np.linalg.norm(text_embedding) + 1e-8)
         
         for item in indexed_data:
-            seed_source = f"{item.get('hash', item['filename'])}_{algo_salt}"
-            np.random.seed(int(hashlib.md5(seed_source.encode()).hexdigest()[:8], 16) % 2**32)
-            img_embedding = np.random.randn(128).astype(np.float32)
-            img_embedding /= (np.linalg.norm(img_embedding) + 1e-8)
+            # Use the STORED descriptor if available, otherwise fallback to hash-based simulation
+            stored_des = item.get("descriptors_map", {}).get(algo_upper)
             
-            # Simulated Cosine Similarity (Dot product of normalized vectors)
+            if stored_des is not None:
+                img_embedding = np.array(stored_des, dtype=np.float32)
+            else:
+                seed_source = f"{item.get('hash', item['filename'])}_{algo_salt}"
+                np.random.seed(int(hashlib.md5(seed_source.encode()).hexdigest()[:8], 16) % 2**32)
+                img_embedding = np.random.randn(128).astype(np.float32)
+                img_embedding /= (np.linalg.norm(img_embedding) + 1e-8)
+            
+            # Ensure shape is 128 (flattened) for dot product
+            img_embedding = img_embedding.flatten()[:128]
+            if img_embedding.shape[0] < 128:
+                img_embedding = np.pad(img_embedding, (0, 128 - img_embedding.shape[0]))
+
+            # Cosine similarity of normalized vectors * 100
             similarity = np.dot(text_embedding, img_embedding) * 100
-            # Scale to UX range but keep variance
-            similarity = max(5, min(98, (similarity + 1) * 45)) # Range -1..1 shifted to roughly 0..90
-            similarity += np.random.normal(0, 2)
+            score = max(0, min(100, similarity))
             
             results.append({
                 **format_indexed_item(item),
-                "similarityScore": round(float(similarity), 1),
+                "similarityScore": round(float(score), 1),
                 "matchesCount": 0,
                 "educational_info": {
-                    "method": "CLIP",
-                    "concept": "Multimodal Semantic Matching",
-                    "details": "Vector distance in shared Text-Image latent space.",
+                    "method": "CLIP-Style Semantic",
+                    "concept": "Multimodal Vector Embedding Matching",
+                    "details": f"Text query projected to {algo_upper} space and matched against stored image vectors.",
                     "color_matching": {"query": "Semantic Text", "target": item.get("color_stats") if get_type_for_algorithm(item.get("algorithm")) != "TBIR" else "N/A"}
                 }
             })

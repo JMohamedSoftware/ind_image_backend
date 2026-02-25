@@ -190,6 +190,31 @@ def get_type_for_algorithm(algo):
     if algo in ["SIFT", "ORB", "AKAZE", "HOG"]: return "CBIR"
     return "CBIR" # Default
 
+def get_semantic_features(text, algo, length=128):
+    """
+    Simulates semantic embeddings by averaging random vectors for each token.
+    This enables partial matches (e.g. 'red car' matches 'a red car on the beach').
+    """
+    algo_salt = hashlib.md5(algo.upper().encode()).hexdigest()[:4]
+    # Tokenize: split by spaces, remove common punctuation, only words > 1 char
+    tokens = [t.strip().lower() for t in text.replace(',', ' ').replace('.', ' ').split() if len(t.strip()) > 1]
+    
+    if not tokens:
+        tokens = ["dummy"]
+    
+    vectors = []
+    for token in tokens:
+        seed = f"{token}_{algo_salt}"
+        np.random.seed(int(hashlib.md5(seed.encode()).hexdigest()[:8], 16) % 2**32)
+        v = np.random.randn(length).astype(np.float32)
+        vectors.append(v)
+    
+    # Average the vectors for each token
+    avg_vector = np.mean(vectors, axis=0)
+    # L2 Normalization ensures cosine similarity = dot product
+    avg_vector /= (np.linalg.norm(avg_vector) + 1e-8)
+    return avg_vector
+
 def process_image_content(contents, algorithm="ORB", description=None):
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -208,24 +233,23 @@ def process_image_content(contents, algorithm="ORB", description=None):
         algo_salt = hashlib.md5(algo.encode()).hexdigest()[:4]
         
         # Use description if available for ALL DL algorithms (enables text search for CNN, SVM, etc.)
-        if description:
-            seed_text = f"{description.lower().strip()}_{algo_salt}"
-        else:
-            img_hash = get_image_hash(contents) if contents else "00000000"
-            seed_text = f"{img_hash[:8]}_{algo_salt}"
-            
-        np.random.seed(int(hashlib.md5(seed_text.encode()).hexdigest()[:8], 16) % 2**32)
-            
         # Different lengths for different algos
         if algo == "CNN": length = 4096
         elif algo == "CLIP": length = 512
         elif algo == "SVM": length = 64
         elif algo == "MEANSHIFT": length = 16
         else: length = 32
-        
-        # Use randn (not rand) for centered distributions and normalize to unit length
-        features = np.random.randn(length).astype(np.float32)
-        features /= (np.linalg.norm(features) + 1e-8) # L2 Normalization
+
+        if description:
+            # SEMANTIC FEATURE EXTRACTION: Token-based averaging for robust matching
+            features = get_semantic_features(description, algo, length=length)
+        else:
+            # Fallback to hash-based for images without descriptions
+            img_hash = get_image_hash(contents) if contents else "00000000"
+            seed_text = f"{img_hash[:8]}_{algo_salt}"
+            np.random.seed(int(hashlib.md5(seed_text.encode()).hexdigest()[:8], 16) % 2**32)
+            features = np.random.randn(length).astype(np.float32)
+            features /= (np.linalg.norm(features) + 1e-8)
         return [], features, color_stats
     
     detector = get_detector(algo)
@@ -296,11 +320,10 @@ def format_indexed_item(item):
 async def list_indexed_images(type: str = None):
     # Return images filtered by category (TBIR, CBIR, DL)
     # This allows all images in a category to show up regardless of current algo
-    filtered = indexed_data
-    if type:
-        filtered = [img for img in indexed_data if img.get("type", "CBIR") == type.upper()]
-    
-    return [format_indexed_item(img) for img in filtered]
+    # Since we extract features for ALL algorithms during indexing,
+    # every image is technically available for all search types.
+    # We allow all images to be listed in any category tab for a unified experience.
+    return [format_indexed_item(img) for img in indexed_data]
 
 @app.post("/api/index")
 async def index_image(
@@ -424,10 +447,8 @@ async def search_image(
 
     # 1. SPECIAL CASE: Multimodal CLIP Fusion
     if algo == "CLIP" and query_text:
-        # Text vector
-        query_hash = hashlib.md5(query_text.lower().strip().encode()).hexdigest()
-        np.random.seed(int(query_hash[:8], 16) % 2**32)
-        text_embedding = np.random.rand(128).astype(np.float32)
+        # SEMANTIC SEARCH: Use the same token-averaging logic as indexing
+        text_embedding = get_semantic_features(query_text, algo, length=128)
         
         # Fuse if image exists
         if des_query is not None:
@@ -670,12 +691,8 @@ async def search_text(
     
     # 2. Path for DL (Semantic CLIP Search)
     else:
-        # Simulate CLIP-style matching
-        algo_salt = hashlib.md5(algo_upper.encode()).hexdigest()[:4]
-        query_hash = hashlib.md5(f"{query.lower().strip()}_{algo_salt}".encode()).hexdigest()
-        np.random.seed(int(query_hash[:8], 16) % 2**32)
-        text_embedding = np.random.randn(128).astype(np.float32)
-        text_embedding /= (np.linalg.norm(text_embedding) + 1e-8)
+        # SEMANTIC SEARCH: Use the same token-averaging logic as indexing
+        text_embedding = get_semantic_features(query, algo_upper, length=128)
         
         for item in indexed_data:
             # Use the STORED descriptor if available, otherwise fallback to hash-based simulation

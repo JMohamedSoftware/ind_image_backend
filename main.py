@@ -617,35 +617,40 @@ async def search_text(
     
     # 1. Path for TBIR (Keyword Search / Inverted Index Logic)
     if get_type_for_algorithm(algo_upper) == "TBIR":
-            query_words_clean = [w.strip(",.!?") for w in query.lower().split() if len(w) > 2]
-            if not query_words_clean: query_words_clean = [query.lower().strip()]
+            # Support comma-separated OR space-separated queries
+            query_cleaned = query.lower().replace(',', ' ')
+            query_tokens = list(set([w.strip() for w in query_cleaned.split() if len(w) >= 1]))
+            
+            if not query_tokens:
+                return {"results": [], "message": "Query too short."}
             
             for item in indexed_data:
-                desc = (item.get("description") or "").lower()
-                name = item["filename"].lower().replace('.', ' ')
-                content_pool = f"{desc} {name}"
+                # Treat description as a set of comma-separated tags
+                desc_raw = (item.get("description") or "").lower()
+                desc_tags = set([t.strip() for t in desc_raw.replace(',', ' ').split() if t.strip()])
                 
-                matches = []
-                for word in query_words_clean:
-                    # Strict word boundary match to avoid partial matches like "car" in "carpet"
-                    if f" {word} " in f" {content_pool} ":
-                        matches.append(word)
+                # Also consider filename as secondary context
+                file_context = set(item["filename"].lower().replace('.', ' ').split())
                 
-                if matches:
-                    # Better scoring for exact word matches (Jaccard-ish)
-                    # Unique matches / Total query words
-                    score = (len(list(set(matches))) / len(list(set(query_words_clean)))) * 100
-                    results.append({
-                        **format_indexed_item(item),
-                        "similarityScore": round(float(score), 1),
-                        "matchesCount": len(matches),
-                        "educational_info": {
-                            "method": "Inverted Index",
-                            "concept": "Keyword-Based Retrieval",
-                            "details": f"Matched words: {', '.join(matches)}",
-                            "color_matching": {"query": "Text Only", "target": "N/A (Hidden in TBIR)"}
-                        }
-                    })
+                full_context = desc_tags.union(file_context)
+                
+                # Calculate how many of the query's words are in the image's tags
+                matched_tokens = [q for q in query_tokens if q in full_context]
+                
+                # Percentage Score: (Matches / Query Count) * 100
+                score = (len(matched_tokens) / len(query_tokens)) * 100
+                
+                results.append({
+                    **format_indexed_item(item),
+                    "similarityScore": round(float(score), 1),
+                    "matchesCount": len(matched_tokens),
+                    "educational_info": {
+                        "method": "Keyword Overlap",
+                        "concept": "Boolean Retrieval Logic",
+                        "details": f"Matched tags: {', '.join(matched_tokens)}" if matched_tokens else "No keyword overlap found.",
+                        "color_matching": {"query": "Text Only", "target": "N/A"}
+                    }
+                })
     
     # 2. Path for DL (Semantic CLIP Search)
     else:

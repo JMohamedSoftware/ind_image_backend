@@ -162,7 +162,12 @@ def extract_hog(img):
     hog = cv2.HOGDescriptor()
     # 64x128 image results in 3,780 features with default params
     h = hog.compute(gray)
-    return h.flatten()
+    features = h.flatten().astype(np.float32)
+    # L2 Normalization ensures cosine similarity is stable
+    norm = np.linalg.norm(features)
+    if norm > 1e-6:
+        features /= norm
+    return features
 
 def get_color_histogram(img):
     # Simple RGB average percentages for education
@@ -557,9 +562,15 @@ async def search_image(
                     norm2 = np.linalg.norm(d2)
                     if norm1 > 1e-6 and norm2 > 1e-6: # Prevent division by zero
                         cos_sim = dot / (norm1 * norm2)
-                        # HOG similarity often naturally sits high, let's scale it for better UX
-                        # (cos_sim - bias) / scale
-                        score = max(0, min(100, (cos_sim - 0.5) * 200)) if algo == "HOG" else max(0, min(100, cos_sim * 100))
+                        
+                        # HOG similarity often naturally sits extremely high (> 0.9)
+                        # We use a higher bias and steeper scale to make it discriminative
+                        # Match 0.85 -> 0%, 1.0 -> 100%
+                        if algo == "HOG":
+                            score = max(0, min(100, (cos_sim - 0.85) * 666))
+                            print(f"HOG Debug: cos_sim={cos_sim:.4f}, score={score:.1f}%")
+                        else:
+                            score = max(0, min(100, cos_sim * 100))
                     else:
                         score = 0
                     matches_count = 0

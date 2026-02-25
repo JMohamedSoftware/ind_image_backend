@@ -27,9 +27,9 @@ if MONGO_URL:
         client = pymongo.MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
         # Force a connection to verify
         client.admin.command('ping')
-        db = client.get_default_database()
+        db = client["test"]
         collection = db["image_index"]
-        print("DATABASE: Connected to MongoDB Atlas")
+        print("DATABASE: Connected to MongoDB Atlas (DB: test)")
     except Exception as e:
         print(f"DATABASE ERROR: MongoDB connection failed: {e}")
 
@@ -659,7 +659,7 @@ async def search_text(
             })
 
     results = sorted(results, key=lambda x: x["similarityScore"], reverse=True)
-    return {"results": results[:6]}
+    return {"results": results}
 
 @app.post("/api/segment")
 async def segment_image(file: UploadFile = File(...)):

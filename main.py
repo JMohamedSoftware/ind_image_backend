@@ -322,13 +322,20 @@ def format_indexed_item(item):
     return formatted
 
 @app.get("/api/index/list")
-async def list_indexed_images(type: str = None):
-    # Return images filtered by category (TBIR, CBIR, DL)
-    # This allows all images in a category to show up regardless of current algo
-    # Since we extract features for ALL algorithms during indexing,
-    # every image is technically available for all search types.
-    # We allow all images to be listed in any category tab for a unified experience.
-    return [format_indexed_item(img) for img in indexed_data]
+async def list_indexed_images(type: str = None, algorithm: str = None):
+    # Return images filtered by algorithm or category
+    filtered = indexed_data
+    
+    # If algorithm is specified (e.g. ?algorithm=CNN), we only show images indexed with that
+    if algorithm:
+        target_algo = algorithm.upper()
+        filtered = [img for img in indexed_data if img.get("algorithm") == target_algo]
+    # If only type is specified (e.g. ?type=DL), we show images whose indexed algorithm belongs to that category
+    elif type:
+        target_type = type.upper()
+        filtered = [img for img in indexed_data if img.get("type") == target_type]
+    
+    return [format_indexed_item(img) for img in filtered]
 
 @app.post("/api/index")
 async def index_image(
@@ -363,27 +370,13 @@ async def index_image(
     
     # Determine type based on algorithm
     img_type = get_type_for_algorithm(algorithm)
+    algo_upper = algorithm.upper()
     
-    # UNIVERSAL DESCRIPTOR EXTRACTION:
-    # Compute descriptors for ALL known algorithms to populate a truly universal pool
-    descriptors_map = {}
-    total_kp_count = 0
+    # ALGORITHM ISOLATION:
+    # Only store the descriptor for the specific algorithm used at indexing time.
+    descriptors_map = {algo_upper: des}
+    total_kp_count = len(kp_coords) if kp_coords else 0
     
-    # Flatten all algos from CATEGORY_MAP
-    all_algos = [algo for group in CATEGORY_MAP.values() for algo in group]
-    
-    for algo_id in all_algos:
-        try:
-            # Re-process for each algo (efficient enough for demo)
-            algo_res = process_image_content(contents, algo_id, description)
-            if algo_res:
-                _, algo_des, _ = algo_res
-                descriptors_map[algo_id] = algo_des
-                if algo_id == algorithm.upper():
-                    total_kp_count = len(algo_res[0])
-        except Exception as e:
-            print(f"Failed to extract {algo_id}: {e}")
-
     global indexed_data
     # Remove any existing entry with the same hash OR filename
     indexed_data = [x for x in indexed_data if x.get("hash") != img_hash and x.get("filename") != target_filename]
@@ -511,10 +504,9 @@ async def search_image(
     if not contents and not (query_text and algorithm.upper() == "CLIP"):
          return {"results": [], "message": "Provide an image or text (for CLIP)"}
 
-    # UNIVERSAL SEARCH: 
-    # Search across ALL indexed images. If an image is missing descriptors for the
-    # current algorithm, we'll handle it below (robust fallback).
-    filtered_db = indexed_data
+    # UNIVERSAL SEARCH -> ISOLATED SEARCH:
+    # Only search across images that were indexed with the CURRENT algorithm.
+    filtered_db = [img for img in indexed_data if img.get("algorithm") == algo]
     
     # Robust Fallback: If visual descriptors failed to extract (e.g. blurry image)
     # we fall back to color comparison so the user always sees results.
@@ -655,6 +647,13 @@ async def search_text(
         return {"results": [], "message": "No images indexed yet."}
 
     algo_upper = algorithm.upper()
+    
+    # ISOLATED SEARCH: Only look at images indexed with this specific algorithm
+    scope_db = [img for img in indexed_data if img.get("algorithm") == algo_upper]
+    
+    if not scope_db:
+        return {"results": [], "message": f"No images indexed with {algo_upper} yet."}
+
     query_words = set(query.lower().strip().split())
     
     results = []
@@ -668,7 +667,7 @@ async def search_text(
             if not query_tokens:
                 return {"results": [], "message": "Query too short."}
             
-            for item in indexed_data:
+            for item in scope_db:
                 # Treat description as a set of comma-separated tags
                 desc_raw = (item.get("description") or "").lower()
                 desc_tags = set([t.strip() for t in desc_raw.replace(',', ' ').split() if t.strip()])
@@ -702,7 +701,7 @@ async def search_text(
         length = get_algo_vector_length(algo_upper)
         text_embedding = get_semantic_features(query, algo_upper, length=length)
         
-        for item in indexed_data:
+        for item in scope_db:
             # Use the STORED descriptor if available, otherwise fallback to hash-based simulation
             stored_des = item.get("descriptors_map", {}).get(algo_upper)
             

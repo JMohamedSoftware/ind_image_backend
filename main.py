@@ -250,7 +250,18 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "indexed_count": len(indexed_data)}
+    return {"status": "ok", "indexed_count": len(indexed_data), "mongo_connected": collection is not None}
+
+@app.get("/api/debug")
+async def debug_info():
+    return {
+        "mongo_url_found": bool(MONGO_URL),
+        "mongo_connected": collection is not None,
+        "indexed_count": len(indexed_data),
+        "local_index_size": os.path.getsize(INDEX_FILE) if os.path.exists(INDEX_FILE) else 0,
+        "env_port": os.environ.get("PORT"),
+        "active_algorithms": CATEGORY_MAP
+    }
 
 def format_indexed_item(item):
     """

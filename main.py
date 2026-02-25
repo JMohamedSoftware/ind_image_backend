@@ -190,6 +190,15 @@ def get_type_for_algorithm(algo):
     if algo in ["SIFT", "ORB", "AKAZE", "HOG"]: return "CBIR"
     return "CBIR" # Default
 
+def get_algo_vector_length(algo):
+    """Retrieves the expected vector dimension for a given DL/structural algorithm."""
+    algo = algo.upper()
+    if algo == "CNN": return 4096
+    if algo == "CLIP": return 512
+    if algo == "SVM": return 64
+    if algo == "MEANSHIFT": return 16
+    return 32
+
 def get_semantic_features(text, algo, length=128):
     """
     Simulates semantic embeddings by averaging random vectors for each token.
@@ -233,12 +242,8 @@ def process_image_content(contents, algorithm="ORB", description=None):
         algo_salt = hashlib.md5(algo.encode()).hexdigest()[:4]
         
         # Use description if available for ALL DL algorithms (enables text search for CNN, SVM, etc.)
-        # Different lengths for different algos
-        if algo == "CNN": length = 4096
-        elif algo == "CLIP": length = 512
-        elif algo == "SVM": length = 64
-        elif algo == "MEANSHIFT": length = 16
-        else: length = 32
+        # CENTRALIZED LENGTH LOGIC: Get dimensions from helper
+        length = get_algo_vector_length(algo)
 
         if description:
             # SEMANTIC FEATURE EXTRACTION: Token-based averaging for robust matching
@@ -447,12 +452,14 @@ async def search_image(
 
     # 1. SPECIAL CASE: Multimodal CLIP Fusion
     if algo == "CLIP" and query_text:
-        # SEMANTIC SEARCH: Use the same token-averaging logic as indexing
-        text_embedding = get_semantic_features(query_text, algo, length=128)
+        # SEMANTIC SEARCH: Use the corrected length for CLIP
+        length = get_algo_vector_length(algo)
+        text_embedding = get_semantic_features(query_text, algo, length=length)
         
         # Fuse if image exists
         if des_query is not None:
-            final_query_embedding = (text_embedding + des_query.flatten()[:128]) / 2
+            # Flatten to original algorithm length before fusion
+            final_query_embedding = (text_embedding + des_query.flatten()[:length]) / 2
             method_name = "CLIP Multimodal Fusion"
             concept_text = f"Neural fusion: Image + '{query_text}'"
         else:
@@ -471,13 +478,13 @@ async def search_image(
                 algo_salt = hashlib.md5(algo.encode()).hexdigest()[:4]
                 seed_source = f"{item.get('hash', item['filename'])}_{algo_salt}"
                 np.random.seed(int(hashlib.md5(seed_source.encode()).hexdigest()[:8], 16) % 2**32)
-                img_embedding = np.random.randn(128).astype(np.float32)
+                img_embedding = np.random.randn(length).astype(np.float32)
                 img_embedding /= (np.linalg.norm(img_embedding) + 1e-8) # Normalize random vectors
             
-            # Ensure shape is 128 (flattened)
-            img_embedding = img_embedding[:128].flatten()
-            if img_embedding.shape[0] < 128:
-                img_embedding = np.pad(img_embedding, (0, 128 - img_embedding.shape[0]))
+            # Ensure shape is correct (flattened)
+            img_embedding = img_embedding.flatten()[:length]
+            if img_embedding.shape[0] < length:
+                img_embedding = np.pad(img_embedding, (0, length - img_embedding.shape[0]))
 
             similarity = np.dot(final_query_embedding, img_embedding) * 100
             
@@ -691,8 +698,9 @@ async def search_text(
     
     # 2. Path for DL (Semantic CLIP Search)
     else:
-        # SEMANTIC SEARCH: Use the same token-averaging logic as indexing
-        text_embedding = get_semantic_features(query, algo_upper, length=128)
+        # SEMANTIC SEARCH: Use the correct length for the requested algorithm
+        length = get_algo_vector_length(algo_upper)
+        text_embedding = get_semantic_features(query, algo_upper, length=length)
         
         for item in indexed_data:
             # Use the STORED descriptor if available, otherwise fallback to hash-based simulation
@@ -701,15 +709,16 @@ async def search_text(
             if stored_des is not None:
                 img_embedding = np.array(stored_des, dtype=np.float32)
             else:
+                algo_salt = hashlib.md5(algo_upper.encode()).hexdigest()[:4]
                 seed_source = f"{item.get('hash', item['filename'])}_{algo_salt}"
                 np.random.seed(int(hashlib.md5(seed_source.encode()).hexdigest()[:8], 16) % 2**32)
-                img_embedding = np.random.randn(128).astype(np.float32)
+                img_embedding = np.random.randn(length).astype(np.float32)
                 img_embedding /= (np.linalg.norm(img_embedding) + 1e-8)
             
-            # Ensure shape is 128 (flattened) for dot product
-            img_embedding = img_embedding.flatten()[:128]
-            if img_embedding.shape[0] < 128:
-                img_embedding = np.pad(img_embedding, (0, 128 - img_embedding.shape[0]))
+            # Ensure shape matches for dot product
+            img_embedding = img_embedding.flatten()[:length]
+            if img_embedding.shape[0] < length:
+                img_embedding = np.pad(img_embedding, (0, length - img_embedding.shape[0]))
 
             # Cosine similarity of normalized vectors * 100
             similarity = np.dot(text_embedding, img_embedding) * 100

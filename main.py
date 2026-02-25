@@ -29,6 +29,7 @@ save_lock = threading.Lock()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -241,7 +242,11 @@ def get_matcher(algorithm: str):
 
 @app.get("/")
 async def root():
-    return {"message": "Visual Search API — Educational Edition"}
+    return {"status": "online", "message": "Visual Search API — Educational Edition", "version": "1.1.0"}
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "indexed_count": len(indexed_data)}
 
 def format_indexed_item(item):
     """

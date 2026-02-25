@@ -9,8 +9,29 @@ import hashlib
 
 import time
 import uuid
-
 import threading
+import pymongo
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ─── DATABASE CONFIG ───────────────────────────────────────────────────────
+MONGO_URL = os.environ.get("MONGO_URL")
+client = None
+db = None
+collection = None
+
+if MONGO_URL:
+    try:
+        # Use a timeout so it doesn't hang if URL is wrong
+        client = pymongo.MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+        # Force a connection to verify
+        client.admin.command('ping')
+        db = client.get_default_database()
+        collection = db["image_index"]
+        print("DATABASE: Connected to MongoDB Atlas")
+    except Exception as e:
+        print(f"DATABASE ERROR: MongoDB connection failed: {e}")
 
 # ─── UNIVERSAL FEATURE EXTRACTION ──────────────────────────────────────────
 
@@ -39,100 +60,83 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INDEX_FILE = os.path.join(BASE_DIR, "index.pkl")
 
 def save_index(data):
+    # Save to MongoDB if available
+    if collection is not None:
+        try:
+            # We skip heavy threading here for MongoDB as it handles concurrent writes better
+            # but we still want to be safe with the list itself
+            with save_lock:
+                # Prepare data for MongoDB (convert numpy to lists)
+                serializable_data = []
+                for item in data:
+                    new_item = item.copy()
+                    if "descriptors_map" in new_item:
+                        new_item["descriptors_map"] = {
+                            k: v.tolist() if isinstance(v, np.ndarray) else v 
+                            for k, v in new_item["descriptors_map"].items()
+                        }
+                    # Convert any other numpy if found
+                    if isinstance(new_item.get("descriptors"), np.ndarray):
+                        new_item["descriptors"] = new_item["descriptors"].tolist()
+                    serializable_data.append(new_item)
+
+                # Upsert approach to keep DB clean
+                for doc in serializable_data:
+                    # Use hash as a semi-unique identifier to prevent duplicates
+                    collection.replace_one({"hash": doc["hash"]}, doc, upsert=True)
+                print(f"DATABASE: Upserted {len(serializable_data)} items to MongoDB")
+        except Exception as e:
+            print(f"DATABASE ERROR: MongoDB save failed: {e}")
+
+    # Always keep a local backup for safety
     with save_lock:
         try:
             with open(INDEX_FILE, "wb") as f:
                 pickle.dump(data, f)
-            print(f"DATABASE: Saved {len(data)} items to {INDEX_FILE}")
+            print(f"DATABASE: Saved local backup to {INDEX_FILE}")
         except Exception as e:
-            print(f"DATABASE ERROR: Failed to save index: {e}")
+            print(f"DATABASE ERROR: Local save failed: {e}")
 
 def load_index():
+    data = []
+    
+    # 1. Try Loading from MongoDB
+    if collection is not None:
+        try:
+            docs = list(collection.find({}))
+            if docs:
+                for doc in docs:
+                    doc.pop("_id", None) # Remove Mongo specific ID
+                    # Convert lists back to numpy for CV2
+                    if "descriptors_map" in doc:
+                        doc["descriptors_map"] = {
+                            k: np.array(v, dtype=np.float32 if k == "SIFT" else np.uint8) if isinstance(v, list) else v
+                            for k, v in doc["descriptors_map"].items()
+                        }
+                    data.append(doc)
+                print(f"DATABASE: Loaded {len(data)} items from MongoDB Atlas")
+                return data
+        except Exception as e:
+            print(f"DATABASE ERROR: MongoDB load failed: {e}")
+
+    # 2. Fallback to Local + Migration
     if os.path.exists(INDEX_FILE):
         try:
             with open(INDEX_FILE, "rb") as f:
                 data = pickle.load(f)
+                print(f"DATABASE: Loaded {len(data)} items from local backup")
                 
-                # MIGRATION: Ensure all items have a descriptors_map and all simulated descriptors
-                migrated = False
-                all_dl_algos = CATEGORY_MAP["DL"]
+                # If we have local data but Mongo was empty/reachable, migrate it
+                if collection is not None and len(data) > 0:
+                    print("DATABASE: Migrating local data to MongoDB...")
+                    save_index(data)
                 
-                for item in data:
-                    if "descriptors_map" not in item:
-                        print(f"MIGRATION: Updating legacy item {item.get('filename')}")
-                        orig_algo = item.get("algorithm", "ORB").upper()
-                        item["descriptors_map"] = {orig_algo: item.get("descriptors")}
-                        migrated = True
-                    
-                    # Ensure all DL algorithms have descriptors (simulated via hash/description)
-                    img_hash = item.get("hash", "00000000")
-                    description = item.get("description")
-                    
-                    for algo in all_dl_algos:
-                        if algo not in item["descriptors_map"]:
-                            # We can reconstruct simulated features using the hash/description
-                            algo_salt = hashlib.md5(algo.encode()).hexdigest()[:4]
-                            if algo == "CLIP" and description:
-                                seed_text = f"{description.lower().strip()}_{algo_salt}"
-                            else:
-                                seed_text = f"{img_hash[:8]}_{algo_salt}"
-                            
-                            np.random.seed(int(hashlib.md5(seed_text.encode()).hexdigest()[:8], 16) % 2**32)
-                            
-                            if algo == "CNN": length = 4096
-                            elif algo == "CLIP": length = 512
-                            elif algo == "SVM": length = 64
-                            elif algo == "MEANSHIFT": length = 16
-                            else: length = 32
-                            
-                            features = np.random.randn(length).astype(np.float32)
-                            features /= (np.linalg.norm(features) + 1e-8)
-                            item["descriptors_map"][algo] = features
-                            migrated = True
-
-                    # MIGRATION: Re-fetch image and extract CBIR descriptors if missing OR None
-                    cbir_algos = CATEGORY_MAP["CBIR"]
-                    missing_cbir = [a for a in cbir_algos if item.get("descriptors_map", {}).get(a) is None]
-                    if missing_cbir and item.get("url"):
-                        print(f"MIGRATION: Re-extracting CBIR descriptors for {item.get('filename')} (missing: {missing_cbir})")
-                        try:
-                            import requests as _req
-                            r = _req.get(item["url"], timeout=10)
-                            r.raise_for_status()
-                            img_contents = r.content
-                            nparr = np.frombuffer(img_contents, np.uint8)
-                            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                            if img is not None:
-                                for cbir_algo in missing_cbir:
-                                    try:
-                                        if cbir_algo == "HOG":
-                                            features = extract_hog(img)
-                                            item["descriptors_map"][cbir_algo] = features
-                                        else:
-                                            det = get_detector(cbir_algo)
-                                            if det:
-                                                kp, des = det.detectAndCompute(img, None)
-                                                item["descriptors_map"][cbir_algo] = des
-                                        print(f"  {cbir_algo}: OK")
-                                    except Exception as e2:
-                                        print(f"  {cbir_algo}: failed ({e2})")
-                                if not item.get("color_stats"):
-                                    item["color_stats"] = get_color_histogram(img)
-                                migrated = True
-                        except Exception as e:
-                            print(f"MIGRATION: Could not re-fetch {item.get('url')}: {e}")
-
-                
-                if migrated:
-                    print("MIGRATION COMPLETE: Saving updated database.")
-                    save_index(data) # Persist the migrated data
-                
-                print(f"DATABASE: Loaded {len(data)} items from {INDEX_FILE}")
                 return data
         except Exception as e:
-            print(f"DATABASE ERROR: Failed to load index: {e}")
-    else:
-        print(f"DATABASE: {INDEX_FILE} not found, starting fresh.")
+            print(f"DATABASE ERROR: Local load failed: {e}")
+
+    print("DATABASE: No existing data found.")
+    return []
     return []
 
 indexed_data = load_index()
@@ -517,13 +521,17 @@ async def search_image(
                 # Score: needs enough good matches to be relevant
                 if len(good_matches) >= min_good:
                     best_dist = matches[0].distance
+                    # Refined normalized score: distance closer to 0 is better
                     normalized = 1 - min(best_dist / (dist_thresh * 2), 1.0)
-                    count_ratio = len(good_matches) / max(len(kp_query), 1)
+                    # Denominator protection and better ratio
+                    count_ratio = min(len(good_matches) / max(len(kp_query), 50), 1.0)
+                    
                     # count_ratio weighted heavily — more shared keypoints = more similar
-                    score = min((normalized * 0.3 + count_ratio * 0.7) * 100, 100)
+                    # For self-match: normalized=1.0, count_ratio=1.0 -> score=100
+                    score = min((normalized * 0.4 + count_ratio * 0.6) * 100, 100)
                 elif len(good_matches) > 0:
-                    # Very few matches — give a very low score (< 10)
-                    score = (len(good_matches) / min_good) * 10
+                    # Very few matches — give a very low score (< 15)
+                    score = (len(good_matches) / min_good) * 15
                 else:
                     score = 0
                 matches_count = len(good_matches)
@@ -570,7 +578,7 @@ async def search_image(
 
     safe_color_query = color_query if color_query is not None else [128, 128, 128]
     results = sorted(results, key=lambda x: x["similarityScore"], reverse=True)
-    return {"results": results[:6], "query_keypoints": len(kp_query), "query_color_stats": safe_color_query}
+    return {"results": results, "query_keypoints": len(kp_query), "query_color_stats": safe_color_query}
 
 @app.post("/api/search/text")
 async def search_text(
@@ -690,6 +698,12 @@ async def cluster_data(k: int = Form(5)):
 async def clear_index():
     global indexed_data
     indexed_data.clear()
+    if collection is not None:
+        try:
+            collection.delete_many({})
+            print("MongoDB collection cleared.")
+        except Exception as e:
+            print(f"MongoDB clear failed: {e}")
     save_index(indexed_data)
     print("Database cleared successfully.")
     return {"status": "cleared"}

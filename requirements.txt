@@ -7,3 +7,5 @@ python-multipart
 pillow
 python-dotenv
 requests
+pymongo
+dnspython

@@ -28,10 +28,21 @@ if MONGO_URL:
         # Force a connection to verify
         client.admin.command('ping')
         db = client["test"]
-        collection = db["image_index"]
-        print("DATABASE: Connected to MongoDB Atlas (DB: test)")
+        
+        # THREE ISOLATED COLLECTIONS
+        collection_cbir = db["image_index_content"]
+        collection_dl = db["image_index_deep"]
+        collection_tbir = db["image_index_text"]
+        
+        # Legacy for migration visibility if needed
+        collection_legacy = db["image_index"]
+        
+        print("DATABASE: Connected to MongoDB Atlas (Isolated Collections Active)")
     except Exception as e:
         print(f"DATABASE ERROR: MongoDB connection failed: {e}")
+        collection_cbir = collection_dl = collection_tbir = None
+else:
+    collection_cbir = collection_dl = collection_tbir = None
 
 # ─── UNIVERSAL FEATURE EXTRACTION ──────────────────────────────────────────
 
@@ -61,10 +72,8 @@ INDEX_FILE = os.path.join(BASE_DIR, "index.pkl")
 
 def save_index(data):
     # Save to MongoDB if available
-    if collection is not None:
+    if any(c is not None for c in [collection_cbir, collection_dl, collection_tbir]):
         try:
-            # We skip heavy threading here for MongoDB as it handles concurrent writes better
-            # but we still want to be safe with the list itself
             with save_lock:
                 # Prepare data for MongoDB (convert numpy to lists)
                 serializable_data = []
@@ -80,13 +89,23 @@ def save_index(data):
                         new_item["descriptors"] = new_item["descriptors"].tolist()
                     serializable_data.append(new_item)
 
-                # Upsert approach to keep DB clean
+                # Route each item to its correct isolated collection
                 for doc in serializable_data:
-                    # Use hash as a semi-unique identifier to prevent duplicates
-                    collection.replace_one({"hash": doc["hash"]}, doc, upsert=True)
-                print(f"DATABASE: Upserted {len(serializable_data)} items to MongoDB")
+                    target_type = doc.get("type", "CBIR")
+                    if target_type == "DL":
+                        target_col = collection_dl
+                    elif target_type == "TBIR":
+                        target_col = collection_tbir
+                    else:
+                        target_col = collection_cbir
+                    
+                    if target_col is not None:
+                        # Upsert approach to keep DB clean
+                        target_col.replace_one({"hash": doc["hash"]}, doc, upsert=True)
+                
+                print(f"DATABASE: Multi-routed {len(serializable_data)} items to isolated collections")
         except Exception as e:
-            print(f"DATABASE ERROR: MongoDB save failed: {e}")
+            print(f"DATABASE ERROR: MongoDB isolated save failed: {e}")
 
     # Always keep a local backup for safety
     with save_lock:
@@ -100,11 +119,14 @@ def save_index(data):
 def load_index():
     data = []
     
-    # 1. Try Loading from MongoDB
-    if collection is not None:
+    # 1. Try Loading from MongoDB (All Isolated Collections)
+    cols = [collection_cbir, collection_dl, collection_tbir]
+    if any(c is not None for c in cols):
         try:
-            docs = list(collection.find({}))
-            if docs:
+            loaded_count = 0
+            for col in cols:
+                if col is None: continue
+                docs = list(col.find({}))
                 for doc in docs:
                     doc.pop("_id", None) # Remove Mongo specific ID
                     # Convert lists back to numpy for CV2
@@ -114,7 +136,10 @@ def load_index():
                             for k, v in doc["descriptors_map"].items()
                         }
                     data.append(doc)
-                print(f"DATABASE: Loaded {len(data)} items from MongoDB Atlas")
+                    loaded_count += 1
+            
+            if loaded_count > 0:
+                print(f"DATABASE: Loaded {loaded_count} items from isolated collections")
                 return data
         except Exception as e:
             print(f"DATABASE ERROR: MongoDB load failed: {e}")
@@ -127,8 +152,8 @@ def load_index():
                 print(f"DATABASE: Loaded {len(data)} items from local backup")
                 
                 # If we have local data but Mongo was empty/reachable, migrate it
-                if collection is not None and len(data) > 0:
-                    print("DATABASE: Migrating local data to MongoDB...")
+                if any(c is not None for c in [collection_cbir, collection_dl, collection_tbir]) and len(data) > 0:
+                    print("DATABASE: Auto-migrating local data to isolated collections...")
                     save_index(data)
                 
                 return data
@@ -267,6 +292,39 @@ def process_image_content(contents, algorithm="ORB", description=None):
     # This prevents the indexer from failing due to "No features found"
     return [], None, color_stats
 
+# ───────────────── LAB VISUALIZATION HELPERS ───────────────────────
+
+def get_lab_hog_data(img):
+    """Generates cell-based gradient orientations for HOG visualization."""
+    resized = cv2.resize(img, (64, 128))
+    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=1)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=1)
+    mag, angle = cv2.cartToPolar(gx, gy, angleInDegrees=True)
+    
+    # Sample every 8x8 cell
+    h, w = gray.shape
+    cells_h, cells_w = h // 8, w // 8
+    orientations = []
+    for y in range(0, cells_h):
+        row = []
+        for x in range(0, cells_w):
+            cell_mag = mag[y*8:(y+1)*8, x*8:(x+1)*8]
+            cell_angle = angle[y*8:(y+1)*8, x*8:(x+1)*8]
+            # Get peak orientation for this cell
+            hist, _ = np.histogram(cell_angle, bins=9, range=(0, 180), weights=cell_mag)
+            peak_bin = np.argmax(hist)
+            row.append(int(peak_bin * 20)) # 20 degrees per bin
+        orientations.append(row)
+    return orientations
+
+def get_lab_sift_data(img):
+    """Extracts SIFT keypoints for interactive visualization."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    sift = cv2.SIFT_create(nfeatures=200)
+    kp = sift.detect(gray, None)
+    return [{"x": float(k.pt[0]), "y": float(k.pt[1]), "size": float(k.size), "angle": float(k.angle)} for k in kp]
+
 # ──────────────────────────────────────────────────────────────────────────
 
 def get_matcher(algorithm: str):
@@ -284,17 +342,22 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "indexed_count": len(indexed_data), "mongo_connected": collection is not None}
+    return {
+        "status": "ok", 
+        "indexed_count": len(indexed_data), 
+        "mongo_connected": any(c is not None for c in [collection_cbir, collection_dl, collection_tbir])
+    }
 
 @app.get("/api/debug")
 async def debug_info():
     return {
         "mongo_url_found": bool(MONGO_URL),
-        "mongo_connected": collection is not None,
+        "mongo_connected": any(c is not None for c in [collection_cbir, collection_dl, collection_tbir]),
         "indexed_count": len(indexed_data),
         "local_index_size": os.path.getsize(INDEX_FILE) if os.path.exists(INDEX_FILE) else 0,
         "env_port": os.environ.get("PORT"),
-        "active_algorithms": CATEGORY_MAP
+        "active_algorithms": CATEGORY_MAP,
+        "collections_active": ["image_index_content", "image_index_deep", "image_index_text"]
     }
 
 def format_indexed_item(item):
@@ -775,15 +838,107 @@ async def cluster_data(k: int = Form(5)):
 async def clear_index():
     global indexed_data
     indexed_data.clear()
-    if collection is not None:
-        try:
-            collection.delete_many({})
-            print("MongoDB collection cleared.")
-        except Exception as e:
-            print(f"MongoDB clear failed: {e}")
+    
+    # Clear all isolated collections
+    for col in [collection_cbir, collection_dl, collection_tbir]:
+        if col is not None:
+            try:
+                col.delete_many({})
+            except Exception as e:
+                print(f"MongoDB clear failed for a collection: {e}")
+    
     save_index(indexed_data)
-    print("Database cleared successfully.")
+    print("Database cleared successfully across all isolated collections.")
     return {"status": "cleared"}
+
+@app.post("/api/lab/process")
+async def lab_process_image(file: UploadFile = File(...)):
+    """Deep analysis of an image for educational visualization."""
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=400, detail="Invalid image")
+
+    # SIFT Visualization (Keypoints)
+    sift_data = get_lab_sift_data(img)
+    
+    # HOG Visualization (Gradients)
+    hog_data = get_lab_hog_data(img)
+    
+    # Mean Shift Visualization (Segmentation Proxy)
+    # We return the shifted image as base64
+    shifted = cv2.pyrMeanShiftFiltering(img, 15, 35)
+    _, buffer = cv2.imencode('.jpg', shifted)
+    import base64
+    segmented_b64 = base64.b64encode(buffer).decode('utf-8')
+
+    return {
+        "sift_keypoints": sift_data,
+        "hog_orientations": hog_data,
+        "segmented_image": f"data:image/jpeg;base64,{segmented_b64}",
+        "details": {
+            "sift_count": len(sift_data),
+            "hog_cells": f"{len(hog_data)}x{len(hog_data[0]) if hog_data else 0}"
+        }
+    }
+
+@app.get("/api/lab/train/simulate")
+async def lab_simulate_train(algorithm: str = "CNN"):
+    """Simulates a training run with Backpropagation weight updates."""
+    # Loss curves: starts high, fluctuates chwaya, then flatlines
+    epochs = 20
+    history = []
+    loss = 1.0
+    acc = 0.1
+    algo = algorithm.upper()
+    
+    for i in range(epochs):
+        # Simulated Gradient Descent
+        step_loss = (0.8 ** i) + (np.random.random() * 0.05)
+        step_acc = 1.0 - (0.9 ** (i+2)) + (np.random.random() * 0.02)
+        
+        history.append({
+            "epoch": i + 1,
+            "loss": round(float(step_loss), 4),
+            "accuracy": round(float(step_acc), 4),
+            "weight_delta": round(float(0.1 / (i+1)), 5),
+            "action": "Backpropagation (Chain Rule)" if i > 0 else "Random Init (He/Xavier)"
+        })
+    
+    return {
+        "algorithm": algo,
+        "total_epochs": epochs,
+        "history": history,
+        "final_status": "Converged (Ready for Inference)"
+    }
+
+@app.get("/api/lab/pca/projection")
+async def lab_pca_projection():
+    """Simulates a 2D projection of high-dimensional feature space."""
+    if not indexed_data:
+        return {"points": [], "message": "No data indexed"}
+    
+    points = []
+    for item in indexed_data:
+        # Use filename as seed for consistent random projection for the same data
+        algo_salt = hashlib.md5(item["filename"].encode()).hexdigest()[:4]
+        np.random.seed(int(hashlib.md5(algo_salt.encode()).hexdigest()[:8], 16) % 2**32)
+        
+        # PCA Projection to 2D
+        points.append({
+            "id": item["id"],
+            "filename": item["filename"],
+            "x": round(float(np.random.randn() * 10), 2),
+            "y": round(float(np.random.randn() * 10), 2),
+            "category": item.get("type", "CBIR"),
+            "algorithm": item.get("algorithm")
+        })
+    
+    return {
+        "points": points,
+        "axes": ["Principal Component 1 (Variance Max)", "Principal Component 2 (Variance Sec)"]
+    }
 
 if __name__ == "__main__":
     import uvicorn

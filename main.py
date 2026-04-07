@@ -48,8 +48,8 @@ else:
 
 # Define which algorithms belong to which category for "Universal Pool" processing
 CATEGORY_MAP = {
-    "CBIR": ["ORB", "SIFT", "AKAZE", "HOG"],
-    "DL": ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT", "CLIP"],
+    "CBIR": ["SIFT", "HOG"],
+    "DL": ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT"],
     "TBIR": ["TBIR_BASIC"]
 }
 

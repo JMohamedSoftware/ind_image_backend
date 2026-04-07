@@ -1034,8 +1034,13 @@ async def get_image_analysis(image_id: str):
     if not item:
         raise HTTPException(status_code=404, detail="Image not found in index")
     
-    # Get the raw vector
-    vector = item.get("features", [])
+    # Get the raw vector from the indexed metadata
+    # We prefer 'descriptors' which is the standard field in our index.pkl
+    vector = item.get("descriptors", [])
+    if not vector or len(vector) == 0:
+        # Check descriptors_map for the specific algorithm
+        algo = item.get("algorithm", "ORB")
+        vector = item.get("descriptors_map", {}).get(algo, [])
     if isinstance(vector, np.ndarray):
         vector = vector.tolist()
     

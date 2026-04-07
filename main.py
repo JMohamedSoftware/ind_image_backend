@@ -20,6 +20,7 @@ MONGO_URL = os.environ.get("MONGO_URL")
 client = None
 db = None
 collection = None
+collection_cbir = collection_dl = collection_tbir = collection_legacy = None
 
 if MONGO_URL:
     try:
@@ -40,16 +41,15 @@ if MONGO_URL:
         print("DATABASE: Connected to MongoDB Atlas (Isolated Collections Active)")
     except Exception as e:
         print(f"DATABASE ERROR: MongoDB connection failed: {e}")
-        collection_cbir = collection_dl = collection_tbir = None
-else:
-    collection_cbir = collection_dl = collection_tbir = None
 
 # ─── UNIVERSAL FEATURE EXTRACTION ──────────────────────────────────────────
 
 # Define which algorithms belong to which category for "Universal Pool" processing
+# ACADEMIC TAXONOMY: Aligning with Scientific Gold Standard
 CATEGORY_MAP = {
-    "CBIR": ["SIFT", "HOG"],
-    "DL": ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT", "CLIP"],
+    "CBIR": ["SIFT", "HOG", "ORB", "AKAZE", "CANNY"],
+    "ML": ["SVM", "K-MEANS", "PCA", "PFCM", "MEANSHIFT"],
+    "DL": ["CNN", "CLIP", "BACKPROPAGATION"],
     "TBIR": ["TBIR_BASIC"]
 }
 
@@ -217,11 +217,10 @@ def get_color_histogram(img):
 
 def get_type_for_algorithm(algo):
     algo = algo.upper()
-    if algo == "CLIP": return "DL"
-    if algo in ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT"]: return "DL"
+    if algo in ["CNN", "CLIP", "BACKPROPAGATION", "DL"]: return "DL"
+    if algo in ["SVM", "K-MEANS", "PCA", "PFCM", "MEANSHIFT", "ML"]: return "ML"
     if algo.startswith("TBIR"): return "TBIR"
-    if algo in ["SIFT", "ORB", "AKAZE", "HOG"]: return "CBIR"
-    return "CBIR" # Default
+    return "CBIR" # Default (SIFT, HOG, CANNY, etc.)
 
 def get_algo_vector_length(algo):
     """Retrieves the expected vector dimension for a given DL/structural algorithm."""
@@ -230,6 +229,9 @@ def get_algo_vector_length(algo):
     if algo == "CLIP": return 512
     if algo == "SVM": return 64
     if algo == "MEANSHIFT": return 16
+    if algo == "PFCM": return 32
+    if algo == "PCA": return 64
+    if algo == "CANNY": return 1024 # Flattened edge map
     return 32
 
 def get_text_embedding(text, algo, length=128):
@@ -301,7 +303,17 @@ def process_image_content(contents, algorithm="ORB", description=None):
     if algo == "HOG":
         features = extract_hog(img)
         return [], features, color_stats
-    elif algo in ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT", "CLIP"]:
+    elif algo == "CANNY":
+        # SCIENCE: Canny is a structural edge detector (CBIR)
+        # We resize and flatten a thresholded edge map to create a 'Shape Signature'
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        edged = cv2.Canny(gray, 100, 200)
+        # Resize to 32x32 = 1024 features
+        edged_small = cv2.resize(edged, (32, 32)).flatten().astype(np.float32)
+        norm = np.linalg.norm(edged_small)
+        if norm > 1e-6: edged_small /= norm
+        return [], edged_small, color_stats
+    elif algo in ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT", "CLIP", "PFCM"]:
         # Logic: Deep Learning algorithms represent a Multimodal Latent Space
         length = get_algo_vector_length(algo)
         
@@ -399,48 +411,73 @@ async def debug_info():
         "collections_active": ["image_index_content", "image_index_deep", "image_index_text"]
     }
 
-def format_indexed_item(item):
+def format_indexed_item(item, context_algo=None):
     """
     Formats an indexed item for the frontend, respecting pedagogical purity.
-    If the algorithm is TBIR, we strip visual features like color_stats and keypoints.
+    CONTEXTUAL BLINDING: If the requested view is CBIR, we hide all words (descriptions/labels).
     """
-    algo = item.get("algorithm", "ORB")
-    is_tbir = get_type_for_algorithm(algo) == "TBIR"
+    # 1. Determine the context (Are we looking at it through a CBIR, DL, or TBIR lens?)
+    active_algo = context_algo or item.get("algorithm", "ORB")
+    algo_type = get_type_for_algorithm(active_algo)
     
+    # 2. Basic non-leaking fields
     formatted = {
         "id": item.get("id", item["filename"]),
         "filename": item["filename"],
         "url": item.get("url"),
-        "algorithm": item.get("algorithm", algo), # Keep original index algorithm for metadata
-        "description": item.get("description"),
-        "type": item.get("type", "CBIR"),
+        "algorithm": active_algo,
+        "type": algo_type,
     }
     
-    # Pedagogical Purity: In TBIR, the system "doesn't see" pixels/colors
-    if not is_tbir:
+    # 3. CONTEXTUAL ISOLATION LOGIC
+    if algo_type == "CBIR":
+        # SCIENCE: CBIR must be blind to language. No words allowed.
+        formatted["description"] = None 
+        formatted["cnn_label"] = None
         formatted["keypoint_count"] = item.get("keypoint_count", 0)
         formatted["color_stats"] = item.get("color_stats")
-        # Add the AI Prediction Result for DL algorithms (CNN)
-        if item.get("cnn_label"):
-            formatted["cnn_label"] = item.get("cnn_label")
-    
+        
+    elif algo_type in ["ML", "DL"]:
+        # SCIENCE: Machine/Deep Learning models understand both pixels and concepts.
+        formatted["description"] = item.get("description")
+        formatted["cnn_label"] = item.get("cnn_label")
+        formatted["keypoint_count"] = item.get("keypoint_count", 0)
+        formatted["color_stats"] = item.get("color_stats")
+        
+    elif algo_type == "TBIR":
+        # SCIENCE: Traditional Text search ONLY sees words. No pixels allowed.
+        formatted["description"] = item.get("description")
+        formatted["cnn_label"] = None # Text search doesn't predict labels
+        formatted["keypoint_count"] = 0
+        formatted["color_stats"] = None
+        
     return formatted
 
 @app.get("/api/index/list")
 async def list_indexed_images(type: str = None, algorithm: str = None):
-    # Return images filtered by algorithm or category
+    """
+    UNIVERSAL LIBRARY: Returns all images by default.
+    Allows filtering by category/algorithm only if explicitly requested.
+    """
+    if not indexed_data:
+        return []
+        
     filtered = indexed_data
     
-    # If algorithm is specified (e.g. ?algorithm=CNN), we only show images indexed with that
+    # If explicitly filtering by algorithm (e.g. ?algorithm=CNN)
     if algorithm:
         target_algo = algorithm.upper()
-        filtered = [img for img in indexed_data if img.get("algorithm") == target_algo]
-    # If only type is specified (e.g. ?type=DL), we show images whose indexed algorithm belongs to that category
+        # ACADEMIC: We show images that have descriptors for THIS specific algorithm
+        filtered = [img for img in indexed_data if target_algo in img.get("descriptors_map", {})]
+    # If filtering by category (e.g. ?type=DL)
     elif type:
         target_type = type.upper()
-        filtered = [img for img in indexed_data if img.get("type") == target_type]
+        # ACADEMIC: We show images that have at least one algorithm from this category
+        cat_algos = CATEGORY_MAP.get(target_type, [])
+        filtered = [img for img in indexed_data if any(a in img.get("descriptors_map", {}) for a in cat_algos)]
     
-    return [format_indexed_item(img) for img in filtered]
+    # Universal view: Top results are formatted consistently with the requested algorithm lens
+    return [format_indexed_item(img, context_algo=algorithm) for img in filtered]
 
 @app.post("/api/index")
 async def index_image(
@@ -450,8 +487,12 @@ async def index_image(
     algorithm: str = Form("ORB"),
     description: str = Form(None)
 ):
+    # 1. ROBUSTNESS: Max File Size Limit (15MB for stability)
+    MAX_SIZE = 15 * 1024 * 1024
+    
     contents = None
     if url:
+        # ... (URL fetching remains same)
         try:
             response = requests.get(url, timeout=10)
             response.raise_for_status()
@@ -462,16 +503,27 @@ async def index_image(
     elif file:
         contents = await file.read()
         target_filename = file.filename
+        if len(contents) > MAX_SIZE:
+             raise HTTPException(status_code=413, detail="File too large (Max 15MB)")
     else:
         return {"error": "No image provided"}
+
+    # 2. ROBUSTNESS: Valid Image Content Check
+    nparr = np.frombuffer(contents, np.uint8)
+    img_test = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img_test is None:
+        raise HTTPException(status_code=400, detail="Invalid image file - corrupted or unsupported format")
 
     img_hash = get_image_hash(contents)
     algo_upper = algorithm.upper()
     img_type = get_type_for_algorithm(algo_upper)
     
-    # ─── MULTI-ALGORITHM INDEXING ───────────────────────────────────────────
-    # We now extract features for ALL algorithms in the same category
-    category_algos = CATEGORY_MAP.get(img_type, [algo_upper])
+    # ─── UNIVERSAL MULTI-ALGORITHM INDEXING ────────────────────────────────
+    # SCIENCE: Instead of narrow indexing, we process EVERY algorithm in the system.
+    # This ensures "Total Lab Interoperability".
+    all_algos = []
+    for cat in CATEGORY_MAP.values():
+        all_algos.extend(cat)
     
     global indexed_data
     existing_item = next((x for x in indexed_data if x.get("hash") == img_hash), None)
@@ -479,10 +531,15 @@ async def index_image(
     
     kp_coords_primary, des_primary, color_stats = [], None, None
     
-    for a in category_algos:
+    for a in all_algos:
+        # Check if we already have this descriptor and it's not the one being force-indexed
         if a in descriptors_map and a != algo_upper:
             continue
-        res = process_image_content(contents, a, description)
+        
+        # Determine if we should pass description (Semantic algorithms only)
+        desc_param = description if get_type_for_algorithm(a) != "CBIR" else None
+        
+        res = process_image_content(contents, a, desc_param)
         if res:
             kp, des, colors = res
             descriptors_map[a.upper()] = des
@@ -515,10 +572,23 @@ async def index_image(
         "indexed_at": time.time()
     }
 
+    # PERSISTENCE: Record Merging Logic
     if existing_item:
+        # 1. Update/Merge Descriptors Map (Don't lose previous algorithms)
+        current_map = existing_item.get("descriptors_map", {})
+        current_map.update(descriptors_map)
+        updated_obj["descriptors_map"] = current_map
+        
+        # 2. Preserve previous description if new one is empty
+        if not description and existing_item.get("description"):
+            updated_obj["description"] = existing_item["description"]
+            
+        # 3. Update the existing record in-place
         existing_item.update(updated_obj)
+        print(f"DATABASE: Merged and updated record for {target_filename}")
     else:
         indexed_data.append(updated_obj)
+        print(f"DATABASE: Created new record for {target_filename}")
     
     save_index(indexed_data)
     
@@ -614,7 +684,7 @@ async def search_image(
             score = max(0, min(100, similarity))
             
             results.append({
-                **format_indexed_item(item),
+                **format_indexed_item(item, context_algo=algo),
                 "similarityScore": round(float(score), 1),
                 "matchesCount": 0,
                 "educational_info": {
@@ -637,9 +707,9 @@ async def search_image(
     if not contents and not (query_text and algorithm.upper() == "CLIP"):
          return {"results": [], "message": "Provide an image or text (for CLIP)"}
 
-    # UNIVERSAL SEARCH -> ISOLATED SEARCH:
-    # Only search across images that were indexed with the CURRENT algorithm.
-    filtered_db = [img for img in indexed_data if img.get("algorithm") == algo]
+    # UNIVERSAL SEARCH:
+    # Look across ALL images that have the requested descriptor in their map.
+    filtered_db = [img for img in indexed_data if algo in img.get("descriptors_map", {})]
     
     # Robust Fallback: If visual descriptors failed to extract (e.g. blurry image)
     # we fall back to color comparison so the user always sees results.
@@ -655,7 +725,7 @@ async def search_image(
             dist = np.linalg.norm(np.array(safe_color_query) - np.array(item_color))
             score = max(0, 100 - (dist / 4.41)) # 4.41 is max possible distance scaled for 0-100
             results.append({
-                **format_indexed_item(item),
+                **format_indexed_item(item, context_algo=algo),
                 "similarityScore": round(float(score), 1),
                 "matchesCount": 0,
                 "educational_info": {
@@ -780,7 +850,7 @@ async def search_image(
             }
 
             results.append({
-                **format_indexed_item(item),
+                **format_indexed_item(item, context_algo=algo),
                 "similarityScore": round(float(score), 1),
                 "matchesCount": int(matches_count),
                 "educational_info": educational_info
@@ -803,8 +873,9 @@ async def search_text(
 
     algo_upper = algorithm.upper()
     
-    # ISOLATED SEARCH: Only look at images indexed with this specific algorithm
-    scope_db = [img for img in indexed_data if img.get("algorithm") == algo_upper]
+    # UNIVERSAL TEXT SEARCH: Only look at images indexed with a compatible descriptor
+    # (In our case, all images now have CLIP/Text descriptors due to universal indexing)
+    scope_db = [img for img in indexed_data if algo_upper in img.get("descriptors_map", {})]
     
     if not scope_db:
         return {"results": [], "message": f"No images indexed with {algo_upper} yet."}
@@ -837,7 +908,7 @@ async def search_text(
             score = (len(matched_tokens) / len(query_tokens)) * 100
             
             results.append({
-                **format_indexed_item(item),
+                **format_indexed_item(item, context_algo=algo_upper),
                 "similarityScore": round(float(score), 1),
                 "matchesCount": len(matched_tokens),
                 "educational_info": {
@@ -849,12 +920,10 @@ async def search_text(
             })
     
     # 2. Path for DL (Semantic CLIP Search)
-    else:
+    elif get_type_for_algorithm(algo_upper) == "DL":
         # Use Multimodal Search: compute query embedding from text
         length = get_algo_vector_length(algo_upper)
-        if get_type_for_algorithm(algo_upper) == "DL":
-            # Compare query text to indexed fused vectors
-            text_embedding = get_text_embedding(query, algo_upper, length=length)
+        text_embedding = get_text_embedding(query, algo_upper, length=length)
         
         for item in scope_db:
             # Use the STORED descriptor if available, otherwise fallback to hash-based simulation
@@ -879,7 +948,7 @@ async def search_text(
             score = max(0, min(100, similarity))
             
             results.append({
-                **format_indexed_item(item),
+                **format_indexed_item(item, context_algo=algo_upper),
                 "similarityScore": round(float(score), 1),
                 "matchesCount": 0,
                 "educational_info": {
@@ -889,9 +958,11 @@ async def search_text(
                     "color_matching": {"query": "Semantic Text", "target": item.get("color_stats") if get_type_for_algorithm(item.get("algorithm")) != "TBIR" else "N/A"}
                 }
             })
+    else:
+        return {"results": [], "message": "Text search is not supported for classical visual algorithms (SIFT/ORB)."}
 
     results = sorted(results, key=lambda x: x["similarityScore"], reverse=True)
-    return {"results": results}
+    return {"results": results[:6]} # Limit to top 6 results
 
 @app.post("/api/segment")
 async def segment_image(file: UploadFile = File(...)):
@@ -926,22 +997,6 @@ async def cluster_data(k: int = Form(5)):
         "message": "K-Means clustering partitions the feature space into k distinct clusters."
     }
 
-@app.delete("/api/index")
-async def clear_index():
-    global indexed_data
-    indexed_data.clear()
-    
-    # Clear all isolated collections
-    for col in [collection_cbir, collection_dl, collection_tbir]:
-        if col is not None:
-            try:
-                col.delete_many({})
-            except Exception as e:
-                print(f"MongoDB clear failed for a collection: {e}")
-    
-    save_index(indexed_data)
-    print("Database cleared successfully across all isolated collections.")
-    return {"status": "cleared"}
 
 @app.post("/api/lab/process")
 async def lab_process_image(file: UploadFile = File(...)):
@@ -1080,12 +1135,47 @@ async def lab_pca_projection():
     
     return {"points": points}
 
+@app.delete("/api/index")
+async def clear_index():
+    global indexed_data
+    indexed_data = []
+    save_index([])
+    
+    # Clear isolated MongoDB collections
+    cols = [collection_cbir, collection_dl, collection_tbir, collection_legacy]
+    cleared_cols = []
+    for col in cols:
+        if col is not None:
+            col.delete_many({})
+            cleared_cols.append(col.name)
+            
+    return {"message": "Database cleared successfully", "collections_cleared": cleared_cols}
+
+@app.delete("/api/index/{image_id}")
+async def delete_image(image_id: str):
+    global indexed_data
+    original_count = len(indexed_data)
+    indexed_data = [img for img in indexed_data if img.get("id") != image_id]
+    
+    if len(indexed_data) < original_count:
+        save_index(indexed_data)
+        # Handle MongoDB removal
+        for col in [collection_cbir, collection_dl, collection_tbir]:
+            if col is not None:
+                col.delete_one({"id": image_id})
+        return {"message": "Image deleted successfully"}
+    
+    raise HTTPException(status_code=404, detail="Image not found")
+
 @app.get("/api/analysis/{image_id}")
 async def get_image_analysis(image_id: str):
     """Tayara Pro: Full numerical/mathematical analysis of an indexed image."""
     if image_id == "current_lab_result":
-        # Return a high-quality simulated audit for the lab presentation
-        vector = [round(float(x), 4) for x in np.random.randn(128)]
+        # SCIENCE: Ensure simulated vectors are mathematically sound (Normalized)
+        raw_vector = np.random.randn(128).astype(np.float32)
+        raw_vector /= (np.linalg.norm(raw_vector) + 1e-8)
+        vector = [round(float(x), 4) for x in raw_vector]
+        
         hist_bins = 20
         counts, bin_edges = np.histogram(vector, bins=hist_bins)
         distribution = [{"bin": f"{bin_edges[i]:.2f}", "count": int(counts[i])} for i in range(len(counts))]
@@ -1111,7 +1201,7 @@ async def get_image_analysis(image_id: str):
     # Get the raw vector from the indexed metadata
     # We prefer 'descriptors' which is the standard field in our index.pkl
     vector = item.get("descriptors", [])
-    if not vector or len(vector) == 0:
+    if vector is None or (hasattr(vector, "size") and vector.size == 0) or len(vector) == 0:
         # Check descriptors_map for the specific algorithm
         algo = item.get("algorithm", "ORB")
         vector = item.get("descriptors_map", {}).get(algo, [])
@@ -1123,7 +1213,7 @@ async def get_image_analysis(image_id: str):
         vector = []
     
     # If no vector (TBIR), simulate it based on algo
-    if not vector or len(vector) == 0:
+    if vector is None or (hasattr(vector, "size") and vector.size == 0) or len(vector) == 0:
         np.random.seed(int(hashlib.md5(image_id.encode()).hexdigest()[:8], 16) % 2**32)
         length = get_algo_vector_length(item.get("algorithm", "ORB"))
         vector = [round(float(x), 4) for x in np.random.randn(length)]

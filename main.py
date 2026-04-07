@@ -464,10 +464,8 @@ async def index_image(
         color_stats = get_color_histogram(img) if img is not None else {"r":0,"g":0,"b":0}
 
     total_kp_count = len(kp_coords_primary) if kp_coords_primary else 0
-    cnn_label = None
-    if "CNN" in descriptors_map or algo_upper == "CNN":
-        seed = int(img_hash[:8], 16)
-        cnn_label = CNN_CATEGORIES[seed % len(CNN_CATEGORIES)]
+    # SUPERVISED TRAINING: Label comes from the user-provided "Description" during Indexing
+    cnn_label = description if (description and description.strip()) else "Ready for Training (Unlabeled)"
     
     target_id = existing_item["id"] if existing_item else str(uuid.uuid4())
     updated_obj = {

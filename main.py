@@ -232,13 +232,12 @@ def get_algo_vector_length(algo):
     if algo == "MEANSHIFT": return 16
     return 32
 
-def get_semantic_features(text, algo, length=128):
+def get_text_embedding(text, algo, length=128):
     """
-    Simulates semantic embeddings by averaging random vectors for each token.
-    This enables partial matches (e.g. 'red car' matches 'a red car on the beach').
+    SCIENCE: Maps text to a unique vector in a semantic latent space.
+    Each token produces a deterministic random vector which is averaged.
     """
     algo_salt = hashlib.md5(algo.upper().encode()).hexdigest()[:4]
-    # Tokenize: split by spaces, remove common punctuation, only words > 1 char
     tokens = [t.strip().lower() for t in text.replace(',', ' ').replace('.', ' ').split() if len(t.strip()) > 1]
     
     if not tokens:
@@ -251,11 +250,22 @@ def get_semantic_features(text, algo, length=128):
         v = np.random.randn(length).astype(np.float32)
         vectors.append(v)
     
-    # Average the vectors for each token
     avg_vector = np.mean(vectors, axis=0)
-    # L2 Normalization ensures cosine similarity = dot product
     avg_vector /= (np.linalg.norm(avg_vector) + 1e-8)
     return avg_vector
+
+def get_visual_embedding(contents, algo, length=128):
+    """
+    SCIENCE: Maps pixels (represented by hash) to a unique visual identity vector.
+    This simulates a pre-trained CNN extracting invariant features.
+    """
+    algo_salt = hashlib.md5(algo.upper().encode()).hexdigest()[:4]
+    img_hash = hashlib.md5(contents).hexdigest() if contents else "00000000"
+    seed_text = f"{img_hash[:8]}_{algo_salt}"
+    np.random.seed(int(hashlib.md5(seed_text.encode()).hexdigest()[:8], 16) % 2**32)
+    features = np.random.randn(length).astype(np.float32)
+    features /= (np.linalg.norm(features) + 1e-8)
+    return features
 
 def process_image_content(contents, algorithm="ORB", description=None):
     nparr = np.frombuffer(contents, np.uint8)
@@ -270,24 +280,23 @@ def process_image_content(contents, algorithm="ORB", description=None):
         features = extract_hog(img)
         return [], features, color_stats
     elif algo in ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT", "CLIP"]:
-        # Simulate feature extraction for educational demo
-        # Salted Seed: adding algo name ensures different algos produce different rankings (DIVERSITY)
-        algo_salt = hashlib.md5(algo.encode()).hexdigest()[:4]
-        
-        # Use description if available for ALL DL algorithms (enables text search for CNN, SVM, etc.)
-        # CENTRALIZED LENGTH LOGIC: Get dimensions from helper
+        # Logic: Deep Learning algorithms represent a Multimodal Latent Space
         length = get_algo_vector_length(algo)
-
+        
+        # 1. ALWAYS extract visual identity (Consistent Image recognition)
+        visual_features = get_visual_embedding(contents, algo, length=length)
+        
+        # 2. Extract semantic features ONLY if description is provided
         if description:
-            # SEMANTIC FEATURE EXTRACTION: Token-based averaging for robust matching
-            features = get_semantic_features(description, algo, length=length)
-        else:
-            # Fallback to hash-based for images without descriptions
-            img_hash = get_image_hash(contents) if contents else "00000000"
-            seed_text = f"{img_hash[:8]}_{algo_salt}"
-            np.random.seed(int(hashlib.md5(seed_text.encode()).hexdigest()[:8], 16) % 2**32)
-            features = np.random.randn(length).astype(np.float32)
+            semantic_features = get_text_embedding(description, algo, length=length)
+            # Multimodal Fusion: The index descriptor becomes a composite of Visual + Semantic
+            # This represents a "Trained Neuron" that links a picture to a label
+            features = (visual_features * 0.7) + (semantic_features * 0.3)
             features /= (np.linalg.norm(features) + 1e-8)
+        else:
+            # For Search or unlabeled indexing, use raw visual identity
+            features = visual_features
+            
         return [], features, color_stats
     
     detector = get_detector(algo)
@@ -544,7 +553,7 @@ async def search_image(
     if algo == "CLIP" and query_text:
         # SEMANTIC SEARCH: Use the corrected length for CLIP
         length = get_algo_vector_length(algo)
-        text_embedding = get_semantic_features(query_text, algo, length=length)
+        text_embedding = get_text_embedding(query_text, algo, length=length)
         
         # Fuse if image exists
         if des_query is not None:
@@ -819,9 +828,11 @@ async def search_text(
     
     # 2. Path for DL (Semantic CLIP Search)
     else:
-        # SEMANTIC SEARCH: Use the correct length for the requested algorithm
+        # Use Multimodal Search: compute query embedding from text
         length = get_algo_vector_length(algo_upper)
-        text_embedding = get_semantic_features(query, algo_upper, length=length)
+        if get_type_for_algorithm(algo_upper) == "DL":
+            # Compare query text to indexed fused vectors
+            text_embedding = get_text_embedding(query, algo_upper, length=length)
         
         for item in scope_db:
             # Use the STORED descriptor if available, otherwise fallback to hash-based simulation

@@ -853,92 +853,108 @@ async def clear_index():
 
 @app.post("/api/lab/process")
 async def lab_process_image(file: UploadFile = File(...)):
-    """Deep analysis of an image for educational visualization."""
+    """Deep analysis of an image for industrial/educational visualization."""
     contents = await file.read()
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
         raise HTTPException(status_code=400, detail="Invalid image")
 
-    # SIFT Visualization (Keypoints)
+    # 1. SIFT Features (Keypoints)
     sift_data = get_lab_sift_data(img)
     
-    # HOG Visualization (Gradients)
+    # 2. HOG Features (Gradients)
     hog_data = get_lab_hog_data(img)
     
-    # Mean Shift Visualization (Segmentation Proxy)
-    # We return the shifted image as base64
+    # 3. DIGITAL SIGNATURE (The raw Vector)
+    # Simulate a 128D descriptor (first 32 values) for visual display
+    np.random.seed(int(hashlib.md5(contents[:100]).hexdigest()[:8], 16) % 2**32)
+    digital_signature = [round(float(x), 3) for x in np.random.randn(32)]
+
+    # 4. CNN CLASSIFICATION (Inference Result)
+    # We "predict" based on image content (seed)
+    categories = ["Cat", "Dog", "Car", "Human", "Medical (X-Ray)", "Portrait", "Landscape"]
+    pred_idx = int(hashlib.md5(contents[:200]).hexdigest()[:8], 16) % len(categories)
+    prediction = {
+        "label": categories[pred_idx],
+        "confidence": round(0.85 + np.random.random() * 0.14, 2),
+        "alternatives": [
+            {"label": categories[(pred_idx+1)%len(categories)], "score": 0.05},
+            {"label": categories[(pred_idx+2)%len(categories)], "score": 0.02}
+        ]
+    }
+
+    # 5. MEAN SHIFT (Segmentation)
     shifted = cv2.pyrMeanShiftFiltering(img, 15, 35)
     _, buffer = cv2.imencode('.jpg', shifted)
     import base64
     segmented_b64 = base64.b64encode(buffer).decode('utf-8')
 
     return {
-        "sift_keypoints": sift_data,
-        "hog_orientations": hog_data,
-        "segmented_image": f"data:image/jpeg;base64,{segmented_b64}",
-        "details": {
+        "analysis": {
+            "sift_keypoints": sift_data,
+            "hog_orientations": hog_data,
+            "digital_signature": digital_signature,
+            "classification": prediction,
+            "segmented_image": f"data:image/jpeg;base64,{segmented_b64}"
+        },
+        "metadata": {
             "sift_count": len(sift_data),
-            "hog_cells": f"{len(hog_data)}x{len(hog_data[0]) if hog_data else 0}"
+            "descriptor": "128D Float (SIFT Style)"
         }
     }
 
 @app.get("/api/lab/train/simulate")
 async def lab_simulate_train(algorithm: str = "CNN"):
-    """Simulates a training run with Backpropagation weight updates."""
-    # Loss curves: starts high, fluctuates chwaya, then flatlines
+    """Simulates the 'Training / Entraînement' phase with epochs and backpropagation."""
     epochs = 20
     history = []
-    loss = 1.0
-    acc = 0.1
     algo = algorithm.upper()
     
+    # Simulate a learning process
     for i in range(epochs):
-        # Simulated Gradient Descent
-        step_loss = (0.8 ** i) + (np.random.random() * 0.05)
-        step_acc = 1.0 - (0.9 ** (i+2)) + (np.random.random() * 0.02)
+        loss = (0.95 ** (i+1)) + (np.random.random() * 0.05)
+        acc = 1.0 - (0.92 ** (i+5)) + (np.random.random() * 0.01)
+        
+        # Simulated Weight Updates (Backpropagation in action)
+        weight_update = (0.5 / (i + 1))
         
         history.append({
             "epoch": i + 1,
-            "loss": round(float(step_loss), 4),
-            "accuracy": round(float(step_acc), 4),
-            "weight_delta": round(float(0.1 / (i+1)), 5),
-            "action": "Backpropagation (Chain Rule)" if i > 0 else "Random Init (He/Xavier)"
+            "loss": round(float(loss), 4),
+            "accuracy": round(float(acc), 4),
+            "meta": {
+                "action": "Backward Pass (Calculating Gradients)" if i > 0 else "Xavier Initialization",
+                "correction": f"Adjusted weights by -{weight_update:.4f}" if i > 0 else "Ready"
+            }
         })
     
     return {
         "algorithm": algo,
-        "total_epochs": epochs,
         "history": history,
-        "final_status": "Converged (Ready for Inference)"
+        "summary": "Training Complete. Model Poids (Weights) optimized."
     }
 
 @app.get("/api/lab/pca/projection")
 async def lab_pca_projection():
-    """Simulates a 2D projection of high-dimensional feature space."""
+    """Simulates PCA: Feature Reduction for speed (Inference context)."""
+    # ... previous logic was fine, will make sure it's consistent
     if not indexed_data:
         return {"points": [], "message": "No data indexed"}
     
     points = []
     for item in indexed_data:
-        # Use filename as seed for consistent random projection for the same data
         algo_salt = hashlib.md5(item["filename"].encode()).hexdigest()[:4]
         np.random.seed(int(hashlib.md5(algo_salt.encode()).hexdigest()[:8], 16) % 2**32)
-        
-        # PCA Projection to 2D
         points.append({
             "id": item["id"],
             "filename": item["filename"],
             "x": round(float(np.random.randn() * 10), 2),
             "y": round(float(np.random.randn() * 10), 2),
-            "category": item.get("type", "CBIR"),
-            "algorithm": item.get("algorithm")
+            "type": item.get("type", "CBIR")
         })
     
-    return {
-        "points": points,
-        "axes": ["Principal Component 1 (Variance Max)", "Principal Component 2 (Variance Sec)"]
-    }
+    return {"points": points}
 
 if __name__ == "__main__":
     import uvicorn

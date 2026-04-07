@@ -49,7 +49,7 @@ else:
 # Define which algorithms belong to which category for "Universal Pool" processing
 CATEGORY_MAP = {
     "CBIR": ["SIFT", "HOG"],
-    "DL": ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT"],
+    "DL": ["CNN", "SVM", "K-MEANS", "PCA", "MEANSHIFT", "CLIP"],
     "TBIR": ["TBIR_BASIC"]
 }
 
@@ -1062,6 +1062,10 @@ async def get_image_analysis(image_id: str):
     if isinstance(vector, np.ndarray):
         vector = vector.tolist()
     
+    # Ensure vector is a list
+    if vector is None:
+        vector = []
+    
     # If no vector (TBIR), simulate it based on algo
     if not vector or len(vector) == 0:
         np.random.seed(int(hashlib.md5(image_id.encode()).hexdigest()[:8], 16) % 2**32)
@@ -1086,8 +1090,8 @@ async def get_image_analysis(image_id: str):
         "math_metadata": {
             "norm": "L2-Normalized",
             "type": "Floating Point 32-bit",
-            "mean": round(float(np.mean(vector)), 6),
-            "std": round(float(np.std(vector)), 6)
+            "mean": round(float(np.mean(vector)), 6) if vector and len(vector) > 0 else 0.0,
+            "std": round(float(np.std(vector)), 6) if vector and len(vector) > 1 else 0.0
         }
     }
 

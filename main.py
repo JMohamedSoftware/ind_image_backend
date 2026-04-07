@@ -590,6 +590,11 @@ async def search_image(
                     "method": method_name,
                     "concept": concept_text,
                     "details": "Vector alignment in multimodal latent space.",
+                    "math_proof": {
+                        "metric": "Cosine Similarity",
+                        "raw_value": round(float(similarity / 100), 4),
+                        "label": "Similarity Score"
+                    },
                     "color_matching": {"query": "Neural Context", "target": item.get("color_stats") if get_type_for_algorithm(item.get("algorithm")) != "TBIR" else "N/A"}
                 }
             })
@@ -626,6 +631,11 @@ async def search_image(
                     "method": f"{algo} (Color Fallback)",
                     "concept": f"{algo} failed to find keypoints; falling back to color distribution.",
                     "details": "When an image is too blurry or lacks contrast, detectors skip it. We use color clusters to maintain search functionality.",
+                    "math_proof": {
+                        "metric": "L2 Euclidean Distance",
+                        "raw_value": round(float(dist), 2),
+                        "label": "Color Distance"
+                    },
                     "color_matching": {"query": safe_color_query, "target": item_color}
                 }
             })
@@ -715,6 +725,12 @@ async def search_image(
                 "method": algo,
                 "concept": f"Similarity calculated using {algo} features.",
                 "details": "Deep Learning Context" if algo == "CNN" else "Structural features" if algo == "HOG" else "Keypoint matching",
+                "math_proof": {
+                    "metric": "Cosine Similarity" if algo in ["CNN", "HOG"] else "Hamming Distance" if algo == "ORB" else "Euclidean distance",
+                    "raw_value": round(float(cos_sim), 4) if 'cos_sim' in locals() else (round(float(matches[0].distance), 2) if 'matches' in locals() and len(matches) > 0 else 0),
+                    "label": "Raw Distance" if algo in ["SIFT", "ORB"] else "Similarity Score",
+                    "good_matches": matches_count if 'matches_count' in locals() else None
+                },
                 "color_matching": {
                     "query": color_query,
                     "target": item.get("color_stats")

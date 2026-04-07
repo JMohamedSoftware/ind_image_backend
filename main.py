@@ -137,8 +137,10 @@ def load_index():
                     doc.pop("_id", None) # Remove Mongo specific ID
                     # Convert lists back to numpy for CV2
                     if "descriptors_map" in doc:
+                        # Improved type restoration: use float32 for vectors, uint8 for binary descriptors
+                        float_algos = ["SIFT", "HOG", "CNN", "CLIP", "SVM", "K-MEANS", "PCA", "MEANSHIFT"]
                         doc["descriptors_map"] = {
-                            k: np.array(v, dtype=np.float32 if k == "SIFT" else np.uint8) if isinstance(v, list) else v
+                            k: np.array(v, dtype=np.float32 if k.upper() in float_algos else np.uint8) if isinstance(v, list) else v
                             for k, v in doc["descriptors_map"].items()
                         }
                     data.append(doc)
@@ -433,63 +435,79 @@ async def index_image(
         return {"error": "No image provided"}
 
     img_hash = get_image_hash(contents)
-    
-    result = process_image_content(contents, algorithm, description)
-    if result is None:
-        return {"status": "error", "message": "Could not decode image or unsupported algorithm"}
-
-    kp_coords, des, color_stats = result # Standard result for the indexing algo
-    
-    # Determine type based on algorithm
-    img_type = get_type_for_algorithm(algorithm)
     algo_upper = algorithm.upper()
+    img_type = get_type_for_algorithm(algo_upper)
     
-    # ALGORITHM ISOLATION:
-    # Only store the descriptor for the specific algorithm used at indexing time.
-    descriptors_map = {algo_upper: des}
-    total_kp_count = len(kp_coords) if kp_coords else 0
+    # ─── MULTI-ALGORITHM INDEXING ───────────────────────────────────────────
+    # We now extract features for ALL algorithms in the same category
+    category_algos = CATEGORY_MAP.get(img_type, [algo_upper])
     
-    # ─── TAYARA PRO: CNN CLASSIFICATION PRE-STEP ───
+    global indexed_data
+    existing_item = next((x for x in indexed_data if x.get("hash") == img_hash), None)
+    descriptors_map = existing_item.get("descriptors_map", {}) if existing_item else {}
+    
+    kp_coords_primary, des_primary, color_stats = [], None, None
+    
+    for a in category_algos:
+        if a in descriptors_map and a != algo_upper:
+            continue
+        res = process_image_content(contents, a, description)
+        if res:
+            kp, des, colors = res
+            descriptors_map[a.upper()] = des
+            if a == algo_upper:
+                kp_coords_primary, des_primary, color_stats = kp, des, colors
+    
+    if color_stats is None:
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        color_stats = get_color_histogram(img) if img is not None else {"r":0,"g":0,"b":0}
+
+    total_kp_count = len(kp_coords_primary) if kp_coords_primary else 0
     cnn_label = None
-    if algo_upper == "CNN":
-        # Stable prediction based on image hash
+    if "CNN" in descriptors_map or algo_upper == "CNN":
         seed = int(img_hash[:8], 16)
         cnn_label = CNN_CATEGORIES[seed % len(CNN_CATEGORIES)]
     
-    global indexed_data
-    # Remove any existing entry with the same hash OR filename
-    indexed_data = [x for x in indexed_data if x.get("hash") != img_hash and x.get("filename") != target_filename]
-    
-    indexed_data.append({
-        "id": str(uuid.uuid4()),
+    target_id = existing_item["id"] if existing_item else str(uuid.uuid4())
+    updated_obj = {
+        "id": target_id,
         "filename": target_filename,
         "url": url if url else None,
         "hash": img_hash,
-        "descriptors": des, # Legacy field for safety
-        "descriptors_map": descriptors_map, # New multi-descriptor storage
-        "algorithm": algorithm.upper(),
+        "descriptors": des_primary,
+        "descriptors_map": descriptors_map,
+        "algorithm": algo_upper,
         "type": img_type,
         "keypoint_count": total_kp_count,
-        "description": description,
+        "description": description or (existing_item.get("description") if existing_item else None),
         "color_stats": color_stats,
         "cnn_label": cnn_label,
         "indexed_at": time.time()
-    })
+    }
+
+    if existing_item:
+        existing_item.update(updated_obj)
+    else:
+        indexed_data.append(updated_obj)
+    
     save_index(indexed_data)
     
     return {
         "status": "success",
-        "id": indexed_data[-1]["id"],
+        "id": target_id,
         "filename": target_filename,
         "keypoints": total_kp_count,
-        "algorithm": algorithm.upper(),
+        "algorithm": algo_upper,
         "type": img_type,
         "color_stats": color_stats,
         "cnn_label": cnn_label,
-        "keypoint_coords": kp_coords[:50] if kp_coords else [],
+        "keypoint_coords": kp_coords_primary[:50] if kp_coords_primary else [],
     }
 
-    return {"status": "error", "message": "No features found in image for chosen algorithm"}
+
+    # ─── END INDEXING LOGIC ────────────────────────────────────────────────
+
 
 @app.post("/api/search")
 async def search_image(

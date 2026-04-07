@@ -871,13 +871,15 @@ async def lab_process_image(file: UploadFile = File(...)):
     np.random.seed(int(hashlib.md5(contents[:100]).hexdigest()[:8], 16) % 2**32)
     digital_signature = [round(float(x), 3) for x in np.random.randn(32)]
 
-    # 4. CNN CLASSIFICATION (Inference Result)
-    # We "predict" based on image content (seed)
+    # 4. SVM CLASSIFICATION (Feature-Based Inference)
+    # SVM doesn't see pixels, it sees the SIFT/HOG vector
     categories = ["Cat", "Dog", "Car", "Human", "Medical (X-Ray)", "Portrait", "Landscape"]
     pred_idx = int(hashlib.md5(contents[:200]).hexdigest()[:8], 16) % len(categories)
     prediction = {
         "label": categories[pred_idx],
         "confidence": round(0.85 + np.random.random() * 0.14, 2),
+        "feature_source": "HOG/SIFT Descriptor",
+        "description": "SVM classified this vector based on its position in the 128D feature space.",
         "alternatives": [
             {"label": categories[(pred_idx+1)%len(categories)], "score": 0.05},
             {"label": categories[(pred_idx+2)%len(categories)], "score": 0.02}

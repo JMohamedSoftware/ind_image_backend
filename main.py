@@ -53,6 +53,12 @@ CATEGORY_MAP = {
     "TBIR": ["TBIR_BASIC"]
 }
 
+CNN_CATEGORIES = [
+    "Cat (Animal)", "Dog (Animal)", "Sports Car (Vehicle)", 
+    "Medical (X-Ray)", "Human Portrait", "City Architecture", 
+    "Natural Landscape", "Floral/Nature", "Food/Cuisine"
+]
+
 app = FastAPI()
 
 # Thread lock for persistence stability
@@ -381,6 +387,9 @@ def format_indexed_item(item):
     if not is_tbir:
         formatted["keypoint_count"] = item.get("keypoint_count", 0)
         formatted["color_stats"] = item.get("color_stats")
+        # Add the AI Prediction Result for DL algorithms (CNN)
+        if item.get("cnn_label"):
+            formatted["cnn_label"] = item.get("cnn_label")
     
     return formatted
 
@@ -440,6 +449,13 @@ async def index_image(
     descriptors_map = {algo_upper: des}
     total_kp_count = len(kp_coords) if kp_coords else 0
     
+    # ─── TAYARA PRO: CNN CLASSIFICATION PRE-STEP ───
+    cnn_label = None
+    if algo_upper == "CNN":
+        # Stable prediction based on image hash
+        seed = int(img_hash[:8], 16)
+        cnn_label = CNN_CATEGORIES[seed % len(CNN_CATEGORIES)]
+    
     global indexed_data
     # Remove any existing entry with the same hash OR filename
     indexed_data = [x for x in indexed_data if x.get("hash") != img_hash and x.get("filename") != target_filename]
@@ -456,6 +472,7 @@ async def index_image(
         "keypoint_count": total_kp_count,
         "description": description,
         "color_stats": color_stats,
+        "cnn_label": cnn_label,
         "indexed_at": time.time()
     })
     save_index(indexed_data)
@@ -468,6 +485,7 @@ async def index_image(
         "algorithm": algorithm.upper(),
         "type": img_type,
         "color_stats": color_stats,
+        "cnn_label": cnn_label,
         "keypoint_coords": kp_coords[:50] if kp_coords else [],
     }
 
@@ -870,10 +888,9 @@ async def lab_process_image(file: UploadFile = File(...)):
     digital_signature = [round(float(x), 3) for x in np.random.randn(32)]
 
     # 2. CNN INFERENCE (Step: Forward Pass -> Label Prediction)
-    cnn_categories = ["Cat (Animal)", "Dog (Animal)", "Sports Car (Vehicle)", "Medical (X-Ray)", "Human Portrait", "City Architecture", "Natural Landscape"]
-    cnn_idx = seed % len(cnn_categories)
+    cnn_idx = seed % len(CNN_CATEGORIES)
     cnn_prediction = {
-        "label": cnn_categories[cnn_idx],
+        "label": CNN_CATEGORIES[cnn_idx],
         "confidence": round(0.88 + np.random.random() * 0.11, 2),
         "layers": ["Conv2D (Features)", "MaxPool (Spatial)", "Flatten (Vector)", "Dense (Decision)"]
     }

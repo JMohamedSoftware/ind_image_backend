@@ -721,16 +721,25 @@ async def search_image(
                     score = 0
                     matches_count = 0
 
+            # --- MATH FORENSIC DATA ---
+            math_proof = {
+                "metric": "Cosine Similarity" if algo in ["CNN", "HOG", "CLIP"] else ("Hamming Distance" if algo == "ORB" else "Euclidean distance"),
+                "label": "Similarity Score" if algo in ["CNN", "HOG", "CLIP"] else "Raw Distance",
+                "raw_value": round(float(cos_sim), 4) if 'cos_sim' in locals() else (round(float(matches[0].distance), 2) if 'matches' in locals() and len(matches) > 0 else 0),
+                "formula": "S(A,B) = (A·B) / (||A||*||B||)" if algo in ["CNN", "HOG", "CLIP"] else "d = sqrt(sum((A-B)^2))",
+                "query_sample": d1[:8].tolist() if 'd1' in locals() else [],
+                "target_sample": d2[:8].tolist() if 'd2' in locals() else [],
+                "norms": [round(float(norm1), 4), round(float(norm2), 4)] if 'norm1' in locals() and 'norm2' in locals() else None,
+                "dot_product": round(float(dot), 4) if 'dot' in locals() else None,
+                "keypoint_totals": [len(kp_query), len(des_indexed)] if algo in ["SIFT", "ORB", "AKAZE"] else None,
+                "good_matches": matches_count if 'matches_count' in locals() else None
+            }
+
             educational_info = {
                 "method": algo,
                 "concept": f"Similarity calculated using {algo} features.",
                 "details": "Deep Learning Context" if algo == "CNN" else "Structural features" if algo == "HOG" else "Keypoint matching",
-                "math_proof": {
-                    "metric": "Cosine Similarity" if algo in ["CNN", "HOG"] else "Hamming Distance" if algo == "ORB" else "Euclidean distance",
-                    "raw_value": round(float(cos_sim), 4) if 'cos_sim' in locals() else (round(float(matches[0].distance), 2) if 'matches' in locals() and len(matches) > 0 else 0),
-                    "label": "Raw Distance" if algo in ["SIFT", "ORB"] else "Similarity Score",
-                    "good_matches": matches_count if 'matches_count' in locals() else None
-                },
+                "math_proof": math_proof,
                 "color_matching": {
                     "query": color_query,
                     "target": item.get("color_stats")

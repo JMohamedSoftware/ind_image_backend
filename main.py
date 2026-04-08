@@ -850,7 +850,7 @@ async def search_image(
                         q_kp = kp_query[m.queryIdx]
                         t_kp = target_kp_coords[m.trainIdx]
                         visual_matches.append({
-                            "query": {"x": q_kp[0], "y": q_kp[1]},
+                            "query": {"x": q_kp["x"], "y": q_kp["y"]},
                             "target": {"x": t_kp["x"], "y": t_kp["y"]}
                         })
 
@@ -924,7 +924,9 @@ async def search_image(
                         }
             return None
         except Exception as e:
+            import traceback
             print(f"Parallel Search Item Error: {e}")
+            traceback.print_exc()
             return None
 
     # Execute Parallel Search using ThreadPoolExecutor

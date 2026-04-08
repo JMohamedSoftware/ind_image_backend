@@ -6,10 +6,10 @@ import requests
 import os
 import pickle
 import hashlib
-
 import time
 import uuid
 import threading
+import concurrent.futures
 import pymongo
 from dotenv import load_dotenv
 
@@ -66,8 +66,12 @@ save_lock = threading.Lock()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "*"
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -95,23 +99,44 @@ def save_index(data):
                         new_item["descriptors"] = new_item["descriptors"].tolist()
                     serializable_data.append(new_item)
 
-                # Route each item to its correct isolated collection
+                # Group operations by target collection
+                operations = {
+                    "DL": [],
+                    "TBIR": [],
+                    "CBIR": []
+                }
+                
                 for doc in serializable_data:
                     target_type = doc.get("type", "CBIR")
-                    if target_type == "DL":
-                        target_col = collection_dl
-                    elif target_type == "TBIR":
-                        target_col = collection_tbir
-                    else:
-                        target_col = collection_cbir
+                    if target_type not in operations:
+                        target_type = "CBIR"
                     
-                    if target_col is not None:
-                        # Upsert approach to keep DB clean
-                        target_col.replace_one({"hash": doc["hash"]}, doc, upsert=True)
+                    # Create Bulk Operation: ReplaceOne based on hash (Deduplication Logic)
+                    from pymongo import ReplaceOne
+                    operations[target_type].append(
+                        ReplaceOne({"hash": doc["hash"]}, doc, upsert=True)
+                    )
                 
-                print(f"DATABASE: Multi-routed {len(serializable_data)} items to isolated collections")
+                # Execute Bulk Writes
+                col_map = {
+                    "DL": collection_dl,
+                    "TBIR": collection_tbir,
+                    "CBIR": collection_cbir
+                }
+                
+                total_ops = 0
+                for t_type, ops in operations.items():
+                    target_col = col_map[t_type]
+                    if target_col is not None and ops:
+                        try:
+                            res = target_col.bulk_write(ops, ordered=False)
+                            total_ops += (res.upserted_count + res.modified_count + res.matched_count)
+                        except Exception as inner_e:
+                            print(f"DATABASE WARNING: Bulk write failed for {t_type}: {inner_e}")
+                
+                print(f"DATABASE: Multi-routed bulk save of {total_ops} operations to isolated collections")
         except Exception as e:
-            print(f"DATABASE ERROR: MongoDB isolated save failed: {e}")
+            print(f"DATABASE ERROR: MongoDB isolated bulk save failed: {e}")
 
     # Always keep a local backup for safety
     with save_lock:
@@ -486,7 +511,8 @@ async def index_image(
     url: str = Form(None),
     filename: str = Form(None),
     algorithm: str = Form("ORB"),
-    description: str = Form(None)
+    description: str = Form(None),
+    multi_extract: bool = Form(False)
 ):
     # 1. ROBUSTNESS: Max File Size Limit (15MB for stability)
     MAX_SIZE = 15 * 1024 * 1024
@@ -519,22 +545,24 @@ async def index_image(
     algo_upper = algorithm.upper()
     img_type = get_type_for_algorithm(algo_upper)
     
-    # ─── UNIVERSAL MULTI-ALGORITHM INDEXING ────────────────────────────────
-    # SCIENCE: Instead of narrow indexing, we process EVERY algorithm in the system.
-    # This ensures "Total Lab Interoperability".
-    all_algos = []
-    for cat in CATEGORY_MAP.values():
-        all_algos.extend(cat)
-    
+    # ─── ADAPTIVE FEATURE EXTRACTION ─────────────────────────────────────────
+    # PERFORMANCE: By default, we only index the requested algorithm to ensure bulk speed.
+    # If multi_extract=True, we process the entire lab taxonomy.
+    algos_to_process = []
+    if multi_extract:
+        for cat in CATEGORY_MAP.values():
+            algos_to_process.extend(cat)
+    else:
+        algos_to_process = [algo_upper]
+        
     global indexed_data
-    # SCIENTIFIC DE-DUPLICATION: We allow the same image to exist in DIFFERENT categories (CBIR, ML, DL)
-    # but we prevent duplicates within the SAME category.
+    # SCIENTIFIC DE-DUPLICATION: Keep records unique by hash/type
     existing_item = next((x for x in indexed_data if x.get("hash") == img_hash and x.get("type") == img_type), None)
     descriptors_map = existing_item.get("descriptors_map", {}) if existing_item else {}
     
     kp_coords_primary, des_primary, color_stats = [], None, None
     
-    for a in all_algos:
+    for a in algos_to_process:
         # Check if we already have this descriptor and it's not the one being force-indexed
         if a in descriptors_map and a != algo_upper:
             continue
@@ -755,13 +783,13 @@ async def search_image(
     if not filtered_db:
         return {"results": [], "message": f"No images in the {search_type} pool yet. Please index some first!"}
 
-    for item in filtered_db:
-        # Pull correct descriptor from the map for the requested search algorithm
+    # 3. PARALLEL EXECUTION ENGINE
+    def process_item_similarity(item):
+        """Helper to calculate similarity for a single item in parallel."""
         des_map = item.get("descriptors_map", {})
         des_indexed = des_map.get(algo)
-        
         if des_indexed is None or len(des_indexed) == 0:
-            continue
+            return None
             
         try:
             if algo in ["SIFT", "ORB", "AKAZE"]:
@@ -770,106 +798,119 @@ async def search_image(
                 idx_d = np.array(des_indexed, dtype=np.float32 if algo == "SIFT" else np.uint8)
                 
                 if q.ndim != 2 or idx_d.ndim != 2:
-                    continue  # Skip malformed descriptors
+                    return None
                 
                 matcher = get_matcher(algo)
                 matches = matcher.match(q, idx_d)
                 matches = sorted(matches, key=lambda x: x.distance)
                 
-                # Thresholds: distances are algorithm-specific
-                if algo == "SIFT":   dist_thresh = 200  # SIFT L2 distances can be large (float)
-                elif algo == "ORB":  dist_thresh = 64   # ORB Hamming distance (8-bit, 256 bits)
+                # Thresholds
+                if algo == "SIFT":   dist_thresh = 200
+                elif algo == "ORB":  dist_thresh = 64
                 elif algo == "AKAZE": dist_thresh = 80
                 else: dist_thresh = 100
                 
                 good_matches = [m for m in matches if m.distance < dist_thresh]
-
-                # Minimum required good matches before given a meaningful score
                 min_good = 4 if algo in ["ORB", "AKAZE"] else 3
 
-                # Score: needs enough good matches to be relevant
                 if len(good_matches) >= min_good:
                     best_dist = matches[0].distance
-                    # Refined normalized score: distance closer to 0 is better
                     normalized = 1 - min(best_dist / (dist_thresh * 2), 1.0)
-                    # Denominator protection and better ratio
                     count_ratio = min(len(good_matches) / max(len(kp_query), 50), 1.0)
-                    
-                    # count_ratio weighted heavily — more shared keypoints = more similar
-                    # For self-match: normalized=1.0, count_ratio=1.0 -> score=100
                     score = min((normalized * 0.4 + count_ratio * 0.6) * 100, 100)
                 elif len(good_matches) > 0:
-                    # Very few matches — give a very low score (< 15)
                     score = (len(good_matches) / min_good) * 15
                 else:
                     score = 0
+                
                 matches_count = len(good_matches)
+                best_match_dist = matches[0].distance if matches else 0
+                
+                # Forensic Data
+                math_proof = {
+                    "metric": "Hamming Distance" if algo != "SIFT" else "L2 Distance",
+                    "raw_value": round(float(best_match_dist), 2),
+                    "label": "Best Match Distance",
+                    "formula": "d = sum(bits_A XOR bits_B)" if algo != "SIFT" else "d = sqrt(sum((A-B)^2))",
+                    "keypoint_totals": [len(kp_query), len(des_indexed)],
+                    "good_matches": matches_count
+                }
+                
+                return {
+                    **format_indexed_item(item, context_algo=algo),
+                    "similarityScore": round(float(score), 1),
+                    "matchesCount": matches_count,
+                    "educational_info": {
+                        "method": algo,
+                        "concept": f"Feature matching using {algo} keypoints.",
+                        "details": f"Found {matches_count} geometrical correspondences.",
+                        "math_proof": math_proof,
+                        "color_matching": {"query": color_query, "target": item.get("color_stats")}
+                    }
+                }
             else:
-                # Vector-based similarity (HOG, CNN, MEANSHIFT, etc.)
+                # Vector-based logic
                 d1 = des_query.flatten().astype(np.float32)
-                d2 = des_indexed.flatten().astype(np.float32)
+                d2 = np.array(des_indexed).flatten().astype(np.float32)
                 
                 if d1.shape == d2.shape:
                     dot = np.dot(d1, d2)
                     norm1 = np.linalg.norm(d1)
                     norm2 = np.linalg.norm(d2)
-                    if norm1 > 1e-6 and norm2 > 1e-6: # Prevent division by zero
+                    if norm1 > 1e-6 and norm2 > 1e-6:
                         cos_sim = dot / (norm1 * norm2)
                         
-                        # HOG similarity often naturally sits between 0.7 and 0.95
-                        # Relaxed bias to 0.7 (Map 0.7 -> 0%, 1.0 -> 100%)
                         if algo == "HOG":
-                            # Robust HOG Mapping: 0.8 cos_sim is a very strong silhouette match
-                            # We use a sigmoid-like offset to make the score feel more natural
+                            score = max(0, min(100, (cos_sim - 0.75) * 400))
+                        elif algo == "CNN":
                             score = max(0, min(100, (cos_sim - 0.6) * 250))
-                            # print(f"HOG Debug: cos_sim={cos_sim:.4f}, score={score:.1f}%")
                         else:
-                            score = max(0, min(100, cos_sim * 100))
-                    else:
-                        score = 0
-                    matches_count = 0
-                else:
-                    score = 0
-                    matches_count = 0
-
-            # --- MATH FORENSIC DATA ---
-            math_proof = {
-                "metric": "Cosine Similarity" if algo in ["CNN", "HOG", "CLIP"] else ("Hamming Distance" if algo == "ORB" else "Euclidean distance"),
-                "label": "Similarity Score" if algo in ["CNN", "HOG", "CLIP"] else "Raw Distance",
-                "raw_value": round(float(cos_sim), 4) if 'cos_sim' in locals() else (round(float(matches[0].distance), 2) if 'matches' in locals() and len(matches) > 0 else 0),
-                "formula": "S(A,B) = (A·B) / (||A||*||B||)" if algo in ["CNN", "HOG", "CLIP"] else "d = sqrt(sum((A-B)^2))",
-                "query_sample": d1[:8].tolist() if 'd1' in locals() else [],
-                "target_sample": d2[:8].tolist() if 'd2' in locals() else [],
-                "norms": [round(float(norm1), 4), round(float(norm2), 4)] if 'norm1' in locals() and 'norm2' in locals() else None,
-                "dot_product": round(float(dot), 4) if 'dot' in locals() else None,
-                "keypoint_totals": [len(kp_query), len(des_indexed)] if algo in ["SIFT", "ORB", "AKAZE"] else None,
-                "good_matches": matches_count if 'matches_count' in locals() else None
-            }
-
-            educational_info = {
-                "method": algo,
-                "concept": f"Similarity calculated using {algo} features.",
-                "details": "Deep Learning Context" if algo == "CNN" else "Structural features" if algo == "HOG" else "Keypoint matching",
-                "math_proof": math_proof,
-                "color_matching": {
-                    "query": color_query,
-                    "target": item.get("color_stats")
-                }
-            }
-
-            results.append({
-                **format_indexed_item(item, context_algo=algo),
-                "similarityScore": round(float(score), 1),
-                "matchesCount": int(matches_count),
-                "educational_info": educational_info
-            })
+                            score = cos_sim * 100
+                        
+                        math_proof = {
+                            "metric": "Cosine Similarity",
+                            "raw_value": round(float(cos_sim), 4),
+                            "label": "Similarity Coefficient",
+                            "formula": "S(A,B) = (A·B) / (||A||*||B||)",
+                            "norms": [round(float(norm1), 4), round(float(norm2), 4)],
+                            "dot_product": round(float(dot), 4)
+                        }
+                        
+                        return {
+                            **format_indexed_item(item, context_algo=algo),
+                            "similarityScore": round(float(score), 1),
+                            "matchesCount": 0,
+                            "educational_info": {
+                                "method": f"{algo} Neural Mapping",
+                                "concept": "High-dimensional vector alignment (Latent Space).",
+                                "details": f"Measured global structural similarity at {round(float(cos_sim), 3)} cosine value.",
+                                "math_proof": math_proof,
+                                "color_matching": {"query": color_query, "target": item.get("color_stats")}
+                            }
+                        }
+            return None
         except Exception as e:
-            print(f"Error matching: {e}")
-            continue
+            print(f"Parallel Search Item Error: {e}")
+            return None
+
+    # Execute Parallel Search using ThreadPoolExecutor
+    import os
+    max_workers = min(32, (os.cpu_count() or 4) + 4)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_results = [executor.submit(process_item_similarity, item) for item in filtered_db]
+        
+        results = []
+        for future in concurrent.futures.as_completed(future_results):
+            try:
+                res = future.result()
+                if res:
+                    results.append(res)
+            except Exception as e:
+                print(f"Future result error: {e}")
 
     safe_color_query = color_query if color_query is not None else [128, 128, 128]
     results = sorted(results, key=lambda x: x["similarityScore"], reverse=True)
-    return {"results": results, "query_keypoints": len(kp_query), "query_color_stats": safe_color_query}
+    return {"results": results[:6], "query_keypoints": len(kp_query), "query_color_stats": safe_color_query}
 
 @app.post("/api/search/text")
 async def search_text(
@@ -1198,7 +1239,8 @@ async def forensic_analysis(
     global indexed_data
     
     # 1. Get Target Image
-    target_item = next((item for item in indexed_data if item["id"] == target_id), None)
+    # ACADEMIC ROBUSTNESS: Check both ID and Filename for the target
+    target_item = next((item for item in indexed_data if item.get("id") == target_id or item.get("filename") == target_id), None)
     if not target_item:
         return {"error": "Target image not found in index."}
     

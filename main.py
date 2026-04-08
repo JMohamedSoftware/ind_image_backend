@@ -165,7 +165,8 @@ def load_index():
                         # Improved type restoration: use float32 for vectors, uint8 for binary descriptors
                         float_algos = ["SIFT", "HOG", "CNN", "CLIP", "SVM", "K-MEANS", "PCA", "MEANSHIFT"]
                         doc["descriptors_map"] = {
-                            k: np.array(v, dtype=np.float32 if k.upper() in float_algos else np.uint8) if isinstance(v, list) else v
+                            # OOM PREVENTION: Hard-Limit legacy loaded arrays to top 300 features
+                            k: np.array(v[:300] if isinstance(v, list) and len(v) > 300 else v, dtype=np.float32 if k.upper() in float_algos else np.uint8) if isinstance(v, list) else v
                             for k, v in doc["descriptors_map"].items()
                         }
                     data.append(doc)
@@ -205,11 +206,13 @@ def get_image_hash(contents):
 def get_detector(algorithm: str):
     algo = algorithm.upper() if algorithm else "ORB"
     if algo == "SIFT":
-        return cv2.SIFT_create(nfeatures=1000, contrastThreshold=0.04)
+        # OOM PREVENTION: Limiting SIFT to 250 features max
+        return cv2.SIFT_create(nfeatures=250, contrastThreshold=0.04)
     elif algo == "AKAZE":
         return cv2.AKAZE_create()
     elif algo == "ORB":
-        return cv2.ORB_create(nfeatures=2000, scaleFactor=1.2, nlevels=8)
+        # OOM PREVENTION: Limiting ORB to 250 features max
+        return cv2.ORB_create(nfeatures=250, scaleFactor=1.2, nlevels=8)
     else:
         return None
 

@@ -666,6 +666,37 @@ async def index_image(
         "keypoint_coords": kp_coords_primary[:50] if kp_coords_primary else [],
     }
 
+@app.post("/api/admin/inject")
+async def inject_data(data: list, confirm: str = None):
+    """ACADEMIC RECOVERY: Manually injects pre-computed descriptors into the system."""
+    if confirm != "PRO_MAX_RESTORE":
+        return {"error": "Authentication required for data injection."}
+    
+    global indexed_data
+    added_count = 0
+    
+    # Process each item
+    for item in data:
+        # 1. Type Restoration: Convert descriptors back to numpy if needed
+        if "descriptors_map" in item:
+            float_algos = ["SIFT", "HOG", "CNN", "CLIP", "SVM", "K-MEANS", "PCA", "MEANSHIFT"]
+            item["descriptors_map"] = {
+                k: np.array(v, dtype=np.float32 if k.upper() in float_algos else np.uint8) if isinstance(v, list) else v
+                for k, v in item["descriptors_map"].items()
+            }
+        
+        # 2. Duplicate Check
+        existing = next((x for x in indexed_data if x.get("hash") == item.get("hash") or x.get("url") == item.get("url")), None)
+        if existing:
+            existing.update(item)
+        else:
+            indexed_data.append(item)
+        added_count += 1
+
+    # 3. Persist
+    save_index(indexed_data)
+    return {"status": "success", "injected_count": added_count, "total_count": len(indexed_data)}
+
 
     # ─── END INDEXING LOGIC ────────────────────────────────────────────────
 

@@ -16,31 +16,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ─── DATABASE CONFIG ───────────────────────────────────────────────────────
+# NOTE: All DB connections happen in background thread so uvicorn starts IMMEDIATELY
 MONGO_URL = os.environ.get("MONGO_URL")
 client = None
 db = None
 collection = None
 collection_cbir = collection_dl = collection_tbir = collection_legacy = None
-
-if MONGO_URL:
-    try:
-        # Use a timeout so it doesn't hang if URL is wrong
-        client = pymongo.MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
-        # Force a connection to verify
-        client.admin.command('ping')
-        db = client["test"]
-        
-        # THREE ISOLATED COLLECTIONS
-        collection_cbir = db["image_index_content"]
-        collection_dl = db["image_index_deep"]
-        collection_tbir = db["image_index_text"]
-        
-        # Legacy for migration visibility if needed
-        collection_legacy = db["image_index"]
-        
-        print("DATABASE: Connected to MongoDB Atlas (Isolated Collections Active)")
-    except Exception as e:
-        print(f"DATABASE ERROR: MongoDB connection failed: {e}")
 
 # ─── UNIVERSAL FEATURE EXTRACTION ──────────────────────────────────────────
 
@@ -196,20 +177,33 @@ def load_index():
 
     print("DATABASE: No existing data found.")
     return []
-    return []
 
 indexed_data = []
 
-def _background_load():
-    global indexed_data
+def _background_init():
+    """Connect to MongoDB AND load data in background so uvicorn starts instantly."""
+    global indexed_data, client, db, collection_cbir, collection_dl, collection_tbir, collection_legacy
+    # 1. Connect to MongoDB
+    if MONGO_URL:
+        try:
+            client = pymongo.MongoClient(MONGO_URL, serverSelectionTimeoutMS=10000)
+            client.admin.command('ping')
+            db = client["test"]
+            collection_cbir = db["image_index_content"]
+            collection_dl   = db["image_index_deep"]
+            collection_tbir = db["image_index_text"]
+            collection_legacy = db["image_index"]
+            print("DATABASE: Connected to MongoDB Atlas (Isolated Collections Active)")
+        except Exception as e:
+            print(f"DATABASE ERROR: MongoDB connection failed: {e}")
+    # 2. Load index data
     try:
         indexed_data = load_index()
         print(f"BACKGROUND LOAD COMPLETE: {len(indexed_data)} items loaded.")
     except Exception as e:
         print(f"Background load failed: {e}")
 
-import threading
-threading.Thread(target=_background_load, daemon=True).start()
+threading.Thread(target=_background_init, daemon=True).start()
 
 def get_image_hash(contents):
     return hashlib.md5(contents).hexdigest()

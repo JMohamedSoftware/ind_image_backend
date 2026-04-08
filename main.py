@@ -60,6 +60,7 @@ app.add_middleware(
 # Use absolute path for persistence
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INDEX_FILE = os.path.join(BASE_DIR, "index.pkl")
+save_lock = threading.Lock()  # Thread-safe saves
 
 def save_index(data):
     # Save to MongoDB if available

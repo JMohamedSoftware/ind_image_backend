@@ -905,7 +905,9 @@ async def search_image(
                             "label": "Similarity Coefficient",
                             "formula": "S(A,B) = (A·B) / (||A||*||B||)",
                             "norms": [round(float(norm1), 4), round(float(norm2), 4)],
-                            "dot_product": round(float(dot), 4)
+                            "dot_product": round(float(dot), 4),
+                            "query_sample": d1[:12].tolist() if d1.size >= 12 else d1.tolist(),
+                            "target_sample": d2[:12].tolist() if d2.size >= 12 else d2.tolist()
                         }
                         
                         return {

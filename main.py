@@ -401,14 +401,15 @@ async def health():
 
 @app.get("/api/debug")
 async def debug_info():
+    global indexed_data
     return {
         "mongo_url_found": bool(MONGO_URL),
         "mongo_connected": any(c is not None for c in [collection_cbir, collection_dl, collection_tbir]),
         "indexed_count": len(indexed_data),
+        "first_item_algos": list(indexed_data[0].get("descriptors_map", {}).keys()) if indexed_data else [],
+        "first_item_type": indexed_data[0].get("type") if indexed_data else None,
         "local_index_size": os.path.getsize(INDEX_FILE) if os.path.exists(INDEX_FILE) else 0,
-        "env_port": os.environ.get("PORT"),
-        "active_algorithms": CATEGORY_MAP,
-        "collections_active": ["image_index_content", "image_index_deep", "image_index_text"]
+        "active_algorithms": CATEGORY_MAP
     }
 
 def format_indexed_item(item, context_algo=None):
@@ -526,7 +527,9 @@ async def index_image(
         all_algos.extend(cat)
     
     global indexed_data
-    existing_item = next((x for x in indexed_data if x.get("hash") == img_hash), None)
+    # SCIENTIFIC DE-DUPLICATION: We allow the same image to exist in DIFFERENT categories (CBIR, ML, DL)
+    # but we prevent duplicates within the SAME category.
+    existing_item = next((x for x in indexed_data if x.get("hash") == img_hash and x.get("type") == img_type), None)
     descriptors_map = existing_item.get("descriptors_map", {}) if existing_item else {}
     
     kp_coords_primary, des_primary, color_stats = [], None, None
@@ -707,9 +710,14 @@ async def search_image(
     if not contents and not (query_text and algorithm.upper() == "CLIP"):
          return {"results": [], "message": "Provide an image or text (for CLIP)"}
 
-    # UNIVERSAL SEARCH:
-    # Look across ALL images that have the requested descriptor in their map.
-    filtered_db = [img for img in indexed_data if algo in img.get("descriptors_map", {})]
+    # UNIVERSAL SEARCH with Absolute Algorithm Isolation:
+    # Only look at images indexed with the EXACT same algorithm.
+    filtered_db = [
+        img for img in indexed_data 
+        if algo in img.get("descriptors_map", {}) and img.get("algorithm") == algo
+    ]
+    
+    print(f"SEARCH DEBUG: algo={algo}, pool_size={len(indexed_data)}, filtered_size={len(filtered_db)}")
     
     # Robust Fallback: If visual descriptors failed to extract (e.g. blurry image)
     # we fall back to color comparison so the user always sees results.
@@ -873,9 +881,12 @@ async def search_text(
 
     algo_upper = algorithm.upper()
     
-    # UNIVERSAL TEXT SEARCH: Only look at images indexed with a compatible descriptor
-    # (In our case, all images now have CLIP/Text descriptors due to universal indexing)
-    scope_db = [img for img in indexed_data if algo_upper in img.get("descriptors_map", {})]
+    # UNIVERSAL TEXT SEARCH with Absolute Algorithm Isolation:
+    # Only look at images indexed with the EXACT same algorithm.
+    scope_db = [
+        img for img in indexed_data 
+        if algo_upper in img.get("descriptors_map", {}) and img.get("algorithm") == algo_upper
+    ]
     
     if not scope_db:
         return {"results": [], "message": f"No images indexed with {algo_upper} yet."}

@@ -198,7 +198,18 @@ def load_index():
     return []
     return []
 
-indexed_data = load_index()
+indexed_data = []
+
+def _background_load():
+    global indexed_data
+    try:
+        indexed_data = load_index()
+        print(f"BACKGROUND LOAD COMPLETE: {len(indexed_data)} items loaded.")
+    except Exception as e:
+        print(f"Background load failed: {e}")
+
+import threading
+threading.Thread(target=_background_load, daemon=True).start()
 
 def get_image_hash(contents):
     return hashlib.md5(contents).hexdigest()
@@ -755,11 +766,11 @@ async def search_image(
     if not contents and not (query_text and algorithm.upper() == "CLIP"):
          return {"results": [], "message": "Provide an image or text (for CLIP)"}
 
-    # UNIVERSAL SEARCH with Absolute Algorithm Isolation:
-    # Only look at images indexed with the EXACT same algorithm.
+    # UNIVERSAL SEARCH with True Multi-Extract Support:
+    # Look at any image that has the requested algorithm descriptor.
     filtered_db = [
         img for img in indexed_data 
-        if algo in img.get("descriptors_map", {}) and img.get("algorithm") == algo
+        if algo in img.get("descriptors_map", {})
     ]
     
     print(f"SEARCH DEBUG: algo={algo}, pool_size={len(indexed_data)}, filtered_size={len(filtered_db)}")
@@ -961,11 +972,11 @@ async def search_text(
 
     algo_upper = algorithm.upper()
     
-    # UNIVERSAL TEXT SEARCH with Absolute Algorithm Isolation:
-    # Only look at images indexed with the EXACT same algorithm.
+    # UNIVERSAL TEXT SEARCH with True Multi-Extract Support:
+    # Only look at images indexed with the EXACT same descriptor available.
     scope_db = [
         img for img in indexed_data 
-        if algo_upper in img.get("descriptors_map", {}) and img.get("algorithm") == algo_upper
+        if algo_upper in img.get("descriptors_map", {})
     ]
     
     if not scope_db:

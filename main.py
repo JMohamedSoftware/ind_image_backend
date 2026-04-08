@@ -199,8 +199,16 @@ def _background_init():
             print(f"DATABASE ERROR: MongoDB connection failed: {e}")
     # 2. Load index data
     try:
-        indexed_data = load_index()
-        print(f"BACKGROUND LOAD COMPLETE: {len(indexed_data)} items loaded.")
+        db_data = load_index()
+        # ACADEMIC: Thread-safe merging to prevent overwriting new uploads
+        if not indexed_data:
+            indexed_data = db_data
+        else:
+            existing_ids = {item.get('id') for item in indexed_data}
+            for item in db_data:
+                if item.get('id') not in existing_ids:
+                    indexed_data.append(item)
+        print(f"BACKGROUND LOAD COMPLETE: {len(indexed_data)} items now in memory.")
     except Exception as e:
         print(f"Background load failed: {e}")
 
@@ -1351,7 +1359,11 @@ async def forensic_analysis(
     }
 
 @app.delete("/api/index")
-async def clear_index():
+async def clear_index(confirm: str = None):
+    # ACADEMIC SECURITY: Prevent accidental global wipes by Requiring confirmation
+    if confirm != "PRO_MAX_RESTORE":
+        return {"error": "Authentication required to clear the global research database. Use confirm=PRO_MAX_RESTORE"}
+    
     global indexed_data
     indexed_data = []
     save_index([])
